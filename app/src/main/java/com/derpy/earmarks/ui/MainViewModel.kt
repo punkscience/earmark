@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.derpy.earmarks.blossom.BlossomService
 import com.derpy.earmarks.data.Earmark
+import com.derpy.earmarks.data.earmarksToJson
 import com.derpy.earmarks.data.EarmarkCache
 import com.derpy.earmarks.data.KeyStore
 import com.derpy.earmarks.data.PendingPruneStore
@@ -165,8 +166,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 var unavailableCount = 0
 
                 if (uncached.isNotEmpty()) {
-                    _state.value = AppState.Downloading(0, uncached.size)
                     for ((i, earmark) in uncached.withIndex()) {
+                        _state.value = AppState.Downloading(i + 1, uncached.size)
                         val destFile = cache.targetFile(earmark)
                         val result = try {
                             blossomService.downloadAndDecrypt(earmark, destFile)
@@ -178,7 +179,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             is BlossomService.DownloadResult.Orphaned -> orphanedTs += earmark.ts
                             is BlossomService.DownloadResult.Unavailable -> unavailableCount++
                         }
-                        _state.value = AppState.Downloading(i + 1, uncached.size)
                     }
                 }
 
@@ -212,6 +212,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 player.setPlaylist(playlist)
+
+                // Write active earmarks to disk for background/Auto offline recovery
+                try {
+                    val file = File(getApplication<Application>().filesDir, "earmarks.json")
+                    val json = earmarksToJson(earmarks)
+                    val tmp = File(file.parentFile, "${file.name}.tmp")
+                    tmp.writeText(json)
+                    if (!tmp.renameTo(file)) {
+                        file.writeText(json)
+                        tmp.delete()
+                    }
+                } catch (_: Exception) {}
+
                 _state.value = AppState.Playing(earmarks, unavailableCount)
 
             } catch (e: Exception) {
@@ -269,6 +282,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val updated = currentEarmarks.filterNot { it.ts == earmark.ts }
         currentEarmarks = updated
         recomputeStats()
+
+        // Write active earmarks to disk for background/Auto offline recovery
+        try {
+            val file = File(getApplication<Application>().filesDir, "earmarks.json")
+            val json = earmarksToJson(updated)
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.writeText(json)
+            if (!tmp.renameTo(file)) {
+                file.writeText(json)
+                tmp.delete()
+            }
+        } catch (_: Exception) {}
+
         _state.value = if (updated.isEmpty()) {
             AppState.Error("No earmarks left")
         } else {
@@ -356,6 +382,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             orphanedTs.forEach { ts ->
                 fullList.firstOrNull { it.ts == ts }?.let { cache.getCachedFile(it)?.delete() }
             }
+
+            // Update saved earmarks list on disk
+            try {
+                val file = File(getApplication<Application>().filesDir, "earmarks.json")
+                val json = earmarksToJson(pruned)
+                val tmp = File(file.parentFile, "${file.name}.tmp")
+                tmp.writeText(json)
+                if (!tmp.renameTo(file)) {
+                    file.writeText(json)
+                    tmp.delete()
+                }
+            } catch (_: Exception) {}
         }
         // If every relay failed, leave the sentinel in place — next launch's
         // reconciliation will retry the publish.

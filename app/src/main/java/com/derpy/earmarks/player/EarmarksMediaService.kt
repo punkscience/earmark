@@ -2,9 +2,11 @@ package com.derpy.earmarks.player
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.net.Uri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Timeline
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.DefaultMediaNotificationProvider
@@ -12,9 +14,12 @@ import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaSession
+import com.derpy.earmarks.data.EarmarkCache
+import com.derpy.earmarks.data.parseEarmarkList
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
 
 private const val NOTIFICATION_CHANNEL_ID = "earmarks_playback"
 private const val NOTIFICATION_ID = 1
@@ -65,6 +70,37 @@ class EarmarksMediaService : MediaLibraryService() {
                 .setNotificationId(NOTIFICATION_ID)
                 .build()
         )
+
+        // Auto-load cached playlist on cold start (e.g. when launched from Android Auto)
+        try {
+            val file = File(filesDir, "earmarks.json")
+            if (file.exists()) {
+                val json = file.readText()
+                val earmarks = parseEarmarkList(json)
+                val cache = EarmarkCache(this)
+                val items = earmarks.mapNotNull { earmark ->
+                    cache.getCachedFile(earmark)?.let { cacheFile ->
+                        MediaItem.Builder()
+                            .setMediaId(earmark.ts.toString())
+                            .setUri(Uri.fromFile(cacheFile))
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle(earmark.title.ifBlank { cacheFile.name })
+                                    .setArtist(earmark.artist.ifBlank { null })
+                                    .setAlbumTitle(earmark.album.ifBlank { null })
+                                    .setIsPlayable(true)
+                                    .setIsBrowsable(false)
+                                    .build()
+                            )
+                            .build()
+                    }
+                }
+                if (items.isNotEmpty()) {
+                    player.setMediaItems(items)
+                    player.prepare()
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession =
@@ -81,7 +117,7 @@ class EarmarksMediaService : MediaLibraryService() {
             NOTIFICATION_CHANNEL_ID,
             "Playback",
             NotificationManager.IMPORTANCE_LOW  // silent but visible
-        ).apply { description = "earwax playback controls" }
+        ).apply { description = "earmarks playback controls" }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
@@ -102,6 +138,11 @@ class EarmarksMediaService : MediaLibraryService() {
             pageSize: Int,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            if (parentId != ROOT_ITEM.mediaId) {
+                // Return empty list if parentId is not root to prevent Android Auto
+                // from trying to recursively browse tracks, causing infinite loops/crashes.
+                return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.of(), params))
+            }
             val timeline = session.player.currentTimeline
             val window = Timeline.Window()
             val items = ImmutableList.builder<MediaItem>()
@@ -113,6 +154,14 @@ class EarmarksMediaService : MediaLibraryService() {
     }
 
     companion object {
-        private val ROOT_ITEM = MediaItem.Builder().setMediaId("earmarks_root").build()
+        private val ROOT_ITEM = MediaItem.Builder()
+            .setMediaId("earmarks_root")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setIsBrowsable(true)
+                    .setIsPlayable(false)
+                    .build()
+            )
+            .build()
     }
 }
