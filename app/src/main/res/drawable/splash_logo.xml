@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive-icon wrapper used as windowSplashScreenAnimatedIcon on Android 12+.
-  Reuses the same cobalt-gradient background and ear-silhouette foreground as
-  the launcher icon so splash and launcher stay visually identical.
+  windowSplashScreenAnimatedIcon for the Android 12+ SplashScreen API. Shows the
+  Punk Science build dots (acid, 100/60/30) on the ink ground — identical mark to
+  the launcher icon. The in-app Compose splash adds the "earmarks" wordmark beneath.
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />
-    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
 </adaptive-icon>
