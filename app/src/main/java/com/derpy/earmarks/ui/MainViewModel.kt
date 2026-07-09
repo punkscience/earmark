@@ -11,6 +11,7 @@ import com.derpy.earmarks.data.KeyStore
 import com.derpy.earmarks.data.PendingPruneStore
 import com.derpy.earmarks.nostr.Bech32
 import com.derpy.earmarks.nostr.NostrService
+import com.derpy.earmarks.player.EarmarksMediaService
 import com.derpy.earmarks.player.PlayerController
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.NonCancellable
@@ -97,6 +98,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         player.connect { /* controller ready */ }
+        EarmarksMediaService.onDeleteRequested = { deleteCurrent() }
         load()
     }
 

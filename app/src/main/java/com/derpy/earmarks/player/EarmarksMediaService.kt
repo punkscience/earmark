@@ -3,17 +3,21 @@ package com.derpy.earmarks.player
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.net.Uri
+import android.os.Bundle
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Timeline
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import com.derpy.earmarks.data.EarmarkCache
 import com.derpy.earmarks.data.parseEarmarkList
 import com.google.common.collect.ImmutableList
@@ -63,6 +67,17 @@ class EarmarksMediaService : MediaLibraryService() {
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .build()
         mediaLibrarySession = MediaLibrarySession.Builder(this, player, SessionCallback()).build()
+
+        // Expose a delete custom action for Android Auto. Auto renders
+        // the icon as a trashcan in the overflow menu.
+        val deleteCommand = SessionCommand(CUSTOM_ACTION_DELETE, Bundle.EMPTY)
+        val deleteButton = CommandButton.Builder()
+            .setSessionCommand(deleteCommand)
+            .setIconResId(android.R.drawable.ic_menu_delete)
+            .setDisplayName("Delete")
+            .setEnabled(true)
+            .build()
+        mediaLibrarySession.setCustomLayout(listOf(deleteButton))
 
         setMediaNotificationProvider(
             DefaultMediaNotificationProvider.Builder(this)
@@ -123,6 +138,19 @@ class EarmarksMediaService : MediaLibraryService() {
 
     private inner class SessionCallback : MediaLibrarySession.Callback {
 
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            command: SessionCommand,
+            extras: Bundle
+        ): ListenableFuture<SessionResult> {
+            if (command.customAction == CUSTOM_ACTION_DELETE) {
+                onDeleteRequested?.invoke()
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            return super.onCustomCommand(session, controller, command, extras)
+        }
+
         override fun onGetLibraryRoot(
             session: MediaLibrarySession,
             browser: MediaSession.ControllerInfo,
@@ -154,6 +182,11 @@ class EarmarksMediaService : MediaLibraryService() {
     }
 
     companion object {
+        private const val CUSTOM_ACTION_DELETE = "com.derpy.earmarks.DELETE"
+
+        /** Callback invoked when the user taps the delete button in Android Auto. */
+        var onDeleteRequested: (() -> Unit)? = null
+
         private val ROOT_ITEM = MediaItem.Builder()
             .setMediaId("earmarks_root")
             .setMediaMetadata(
