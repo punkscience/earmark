@@ -12,21 +12,27 @@ android {
         applicationId = "com.derpy.earmarks"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "1.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
     }
 
     signingConfigs {
-        getByName("debug") {
-            // reuse the auto-generated debug keystore for release installs
+        create("debugShared") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "earmarksdebug"
+            keyPassword = "android"
         }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debugShared")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("debugShared")
         }
     }
 
