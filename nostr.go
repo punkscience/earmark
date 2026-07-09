@@ -10,8 +10,8 @@ import (
 )
 
 var defaultNostrRelays = []string{
+	"wss://relay.towerofsong.ca",
 	"wss://relay.damus.io",
-	"wss://nos.lol",
 	"wss://relay.primal.net",
 	"wss://nostr.wine",
 }
