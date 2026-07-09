@@ -25,7 +25,6 @@ private const val TAG = "NostrService"
 private val DEFAULT_RELAYS = listOf(
     "wss://relay.towerofsong.ca",
     "wss://relay.damus.io",
-    "wss://nos.lol",
     "wss://relay.primal.net",
     "wss://nostr.wine"
 )
