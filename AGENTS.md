@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Universal context for any AI coding agent (Codex, Cursor, Copilot, Gemini, Claude, etc.) operating in this repository.
 
 ## Project Overview
 

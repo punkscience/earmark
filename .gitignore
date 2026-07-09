@@ -27,3 +27,4 @@ app/src/main/assets/
 
 # Standalone Gradle install (not needed, project uses wrapper)
 ~/gradle/
+.kotlin/
