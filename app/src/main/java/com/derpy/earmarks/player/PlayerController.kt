@@ -42,6 +42,9 @@ class PlayerController(private val context: Context) {
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
+    /** Returns the shuffled list that matches the player's current timeline order. */
+    fun getShuffledEarmarks(): List<Earmark> = shuffledEarmarks.toList()
+
     /** Returns the earmark currently playing, or null if nothing is loaded. */
     fun currentEarmark(): Earmark? {
         val mc = controller ?: return null

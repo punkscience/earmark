@@ -215,10 +215,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
                 player.setPlaylist(playlist)
 
-                // Write active earmarks to disk for background/Auto offline recovery
+                // Write active earmarks to disk for background/Auto offline recovery.
+                // Use the shuffled order from the controller so cold starts (Android
+                // Auto, background service) replay in the same shuffled sequence.
                 try {
                     val file = File(getApplication<Application>().filesDir, "earmarks.json")
-                    val json = earmarksToJson(earmarks)
+                    val json = earmarksToJson(player.getShuffledEarmarks())
                     val tmp = File(file.parentFile, "${file.name}.tmp")
                     tmp.writeText(json)
                     if (!tmp.renameTo(file)) {
@@ -285,10 +287,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         currentEarmarks = updated
         recomputeStats()
 
-        // Write active earmarks to disk for background/Auto offline recovery
+        // Write active earmarks to disk for background/Auto offline recovery.
+        // Use the shuffled order so the order survives a restart.
         try {
             val file = File(getApplication<Application>().filesDir, "earmarks.json")
-            val json = earmarksToJson(updated)
+            val json = earmarksToJson(player.getShuffledEarmarks())
             val tmp = File(file.parentFile, "${file.name}.tmp")
             tmp.writeText(json)
             if (!tmp.renameTo(file)) {
