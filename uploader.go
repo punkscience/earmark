@@ -6,7 +6,26 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/dhowden/tag"
 )
+
+// readTrackMetadata reads the artist, album, and title tags from an audio file.
+// Files without readable tags fall back to the filename for the title so the
+// entry is never anonymous, mirroring derpy's behaviour.
+func readTrackMetadata(filePath string) (artist, album, title string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", "", filepath.Base(filePath)
+	}
+	defer file.Close()
+
+	tags, err := tag.ReadFrom(file)
+	if err != nil {
+		return "Unknown Artist", "Unknown Album", filepath.Base(filePath)
+	}
+	return tags.Artist(), tags.Album(), tags.Title()
+}
 
 // uploadFile encrypts and uploads a single file to Blossom, then records it
 // in the Nostr earmark list.
@@ -33,7 +52,11 @@ func uploadFile(hexPrivKey string, filePath string, progress func(msg string)) e
 	}
 
 	progress("  Saving to Nostr...")
+	artist, album, title := readTrackMetadata(filePath)
 	e := Earmark{
+		Artist:    artist,
+		Album:     album,
+		Title:     title,
 		Path:      filePath,
 		Timestamp: time.Now().Unix(),
 		Blossom:   manifest,

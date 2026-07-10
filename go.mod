@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/nbd-wtf/go-nostr v0.52.3
 	github.com/spf13/cobra v1.10.2
 )
