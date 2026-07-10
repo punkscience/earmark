@@ -26,6 +26,11 @@ const (
 	blossomAuthKind  = 24242
 )
 
+// defaultBlossomServers is the fallback list used when the user has not
+// configured any servers. blossom.towerofsong.ca is the primary (self-hosted)
+// server; the others are public fallbacks that accept encrypted blob uploads
+// from any authenticated pubkey. Media-only hosts (e.g. nostr.build) are
+// excluded because they reject encrypted octet-stream blobs with 415.
 var defaultBlossomServers = []string{
 	"https://blossom.towerofsong.ca",
 	"https://blossom.band",
