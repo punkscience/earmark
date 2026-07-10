@@ -223,12 +223,19 @@ func deleteChunk(ctx context.Context, serverURL, sha256hex, hexPrivKey string) e
 	return nil
 }
 
-func downloadChunk(ctx context.Context, serverURL, sha256hex string) ([]byte, error) {
+func downloadChunk(ctx context.Context, serverURL, sha256hex, hexPrivKey string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		serverURL+"/"+sha256hex, nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not build download request: %w", err)
 	}
+	// Sign a "get" authorization so servers with a pubkey allowlist (e.g. the
+	// self-hosted primary) serve the blob back. Public servers ignore it.
+	token, err := blossomAuthToken(hexPrivKey, sha256hex, "get")
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Nostr "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download request failed: %w", err)
@@ -247,10 +254,10 @@ func downloadChunk(ctx context.Context, serverURL, sha256hex string) ([]byte, er
 	return data, nil
 }
 
-func downloadChunkWithFallback(ctx context.Context, chunk BlossomChunk) ([]byte, error) {
+func downloadChunkWithFallback(ctx context.Context, chunk BlossomChunk, hexPrivKey string) ([]byte, error) {
 	var lastErr error
 	for _, server := range chunk.Servers {
-		data, err := downloadChunk(ctx, server, chunk.SHA256)
+		data, err := downloadChunk(ctx, server, chunk.SHA256, hexPrivKey)
 		if err == nil {
 			return data, nil
 		}
@@ -340,7 +347,7 @@ func UploadPrepared(ctx context.Context, hexPrivKey string, chunks []PreparedChu
 type DownloadProgress func(chunksDownloaded, chunksTotal int)
 
 // DownloadAndReassemble fetches all chunks, decrypts, and reassembles to a temp file.
-func DownloadAndReassemble(ctx context.Context, manifest *BlossomManifest, progress DownloadProgress) (string, error) {
+func DownloadAndReassemble(ctx context.Context, manifest *BlossomManifest, hexPrivKey string, progress DownloadProgress) (string, error) {
 	key, err := base64.StdEncoding.DecodeString(manifest.Key)
 	if err != nil {
 		return "", fmt.Errorf("could not decode encryption key: %w", err)
@@ -358,7 +365,7 @@ func DownloadAndReassemble(ctx context.Context, manifest *BlossomManifest, progr
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			data, err := downloadChunkWithFallback(ctx, chunk)
+			data, err := downloadChunkWithFallback(ctx, chunk, hexPrivKey)
 			if err != nil {
 				errs[chunk.Index] = err
 				return

@@ -340,7 +340,7 @@ Tracks that exist locally are skipped.`,
 
 				fmt.Printf("[%d/%d] %s: downloading...\n", i+1, len(earmarks), desc)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				tmp, err := DownloadAndReassemble(ctx, e.Blossom, func(done, total int) {
+				tmp, err := DownloadAndReassemble(ctx, e.Blossom, hexKey, func(done, total int) {
 					fmt.Printf("  chunk %d/%d\n", done, total)
 				})
 				cancel()
