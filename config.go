@@ -35,6 +35,12 @@ type Config struct {
 	// BlossomServers is the list of Blossom server base URLs used for audio
 	// file uploads and downloads. When empty, default servers are used.
 	BlossomServers []string `json:"blossom_servers,omitempty"`
+	// UploadIdleTimeoutSeconds is how long an upload may make no progress (no
+	// bytes sent) before it is abandoned. The deadline resets whenever data
+	// flows, so a slow-but-steady upload runs indefinitely and only a stalled
+	// connection is killed. 0 uses the built-in default. The
+	// EARMARK_UPLOAD_IDLE_TIMEOUT environment variable (in seconds) overrides it.
+	UploadIdleTimeoutSeconds int `json:"upload_idle_timeout_seconds,omitempty"`
 }
 
 // LoadConfig reads the config file; returns an empty Config if the file does not exist.

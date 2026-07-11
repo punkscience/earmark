@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -144,13 +146,33 @@ func blossomAuthToken(hexPrivKey, sha256hex, action string) (string, error) {
 	return base64.StdEncoding.EncodeToString(data), nil
 }
 
-func uploadChunk(ctx context.Context, serverURL string, data []byte, sha256hex, hexPrivKey string) error {
+func uploadChunk(ctx context.Context, serverURL string, data []byte, sha256hex, hexPrivKey string, onBytes func(uploaded int64), idle time.Duration) error {
 	token, err := blossomAuthToken(hexPrivKey, sha256hex, "upload")
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
-		serverURL+"/upload", bytes.NewReader(data))
+
+	// Idle watchdog: cancel the request only after `idle` elapses with no bytes
+	// sent. Every read of the request body resets the timer, so a slow-but-
+	// steady upload never trips it; a stalled socket aborts within one window.
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	timer := time.AfterFunc(idle, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer timer.Stop()
+
+	body := &progressReader{r: bytes.NewReader(data), cb: func(n int64) {
+		timer.Reset(idle)
+		if onBytes != nil {
+			onBytes(n)
+		}
+	}}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut,
+		serverURL+"/upload", body)
 	if err != nil {
 		return fmt.Errorf("could not build upload request: %w", err)
 	}
@@ -159,6 +181,9 @@ func uploadChunk(ctx context.Context, serverURL string, data []byte, sha256hex, 
 	req.ContentLength = int64(len(data))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if stalled.Load() {
+			return fmt.Errorf("upload stalled: no progress for %s", idle)
+		}
 		return fmt.Errorf("upload request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -169,16 +194,38 @@ func uploadChunk(ctx context.Context, serverURL string, data []byte, sha256hex, 
 	return nil
 }
 
-func uploadChunkToServers(ctx context.Context, servers []string, data []byte, sha256hex, hexPrivKey string) ([]string, error) {
+func uploadChunkToServers(ctx context.Context, servers []string, data []byte, sha256hex, hexPrivKey string, onBytes func(uploaded int64), idle time.Duration) ([]string, error) {
 	type result struct {
 		server string
 		err    error
+	}
+	// Uploads run concurrently against every server; report the furthest-along
+	// server's byte count as this chunk's progress, throttled to limit chatter.
+	var mu sync.Mutex
+	var maxBytes, lastReported int64
+	var perServer func(int64)
+	if onBytes != nil {
+		perServer = func(n int64) {
+			mu.Lock()
+			if n > maxBytes {
+				maxBytes = n
+			}
+			m := maxBytes
+			fire := m-lastReported >= 128*1024 || m >= int64(len(data))
+			if fire {
+				lastReported = m
+			}
+			mu.Unlock()
+			if fire {
+				onBytes(m)
+			}
+		}
 	}
 	ch := make(chan result, len(servers))
 	for _, s := range servers {
 		s := s
 		go func() {
-			ch <- result{s, uploadChunk(ctx, s, data, sha256hex, hexPrivKey)}
+			ch <- result{s, uploadChunk(ctx, s, data, sha256hex, hexPrivKey, perServer, idle)}
 		}()
 	}
 	var succeeded []string
@@ -324,23 +371,76 @@ func PrepareUpload(filePath string) ([]PreparedChunk, *BlossomManifest, error) {
 	return prepared, manifest, nil
 }
 
-// UploadProgress is called after each chunk upload.
-type UploadProgress func(chunksUploaded, chunksTotal int)
+// UploadProgress reports cumulative encrypted bytes uploaded for the file.
+type UploadProgress func(bytesUploaded, bytesTotal int64)
+
+// defaultUploadIdleTimeout is how long an upload may make no progress before it
+// is abandoned when no override is configured.
+const defaultUploadIdleTimeout = 60 * time.Second
+
+// uploadIdleTimeout resolves the upload idle timeout: the
+// EARMARK_UPLOAD_IDLE_TIMEOUT env var (seconds) wins, then the config value,
+// then the built-in default.
+func uploadIdleTimeout() time.Duration {
+	if v := os.Getenv("EARMARK_UPLOAD_IDLE_TIMEOUT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	if cfg, err := LoadConfig(); err == nil && cfg.UploadIdleTimeoutSeconds > 0 {
+		return time.Duration(cfg.UploadIdleTimeoutSeconds) * time.Second
+	}
+	return defaultUploadIdleTimeout
+}
 
 // UploadPrepared uploads pre-encrypted chunks to all servers concurrently.
+// Each server request has an idle watchdog: it is cancelled only after the
+// upload makes no progress for the resolved idle timeout, so slow-but-steady
+// uploads run to completion while stalled connections fail fast.
 func UploadPrepared(ctx context.Context, hexPrivKey string, chunks []PreparedChunk, manifest *BlossomManifest, servers []string, progress UploadProgress) error {
-	total := len(chunks)
+	idle := uploadIdleTimeout()
+	var totalBytes int64
 	for _, c := range chunks {
-		accepted, err := uploadChunkToServers(ctx, servers, c.Data, c.SHA256, hexPrivKey)
+		totalBytes += int64(len(c.Data))
+	}
+	var completed int64
+	for _, c := range chunks {
+		chunkLen := int64(len(c.Data))
+		var onBytes func(int64)
+		if progress != nil {
+			onBytes = func(cur int64) {
+				progress(completed+cur, totalBytes)
+			}
+		}
+		accepted, err := uploadChunkToServers(ctx, servers, c.Data, c.SHA256, hexPrivKey, onBytes, idle)
 		if err != nil {
 			return err
 		}
 		manifest.Chunks[c.Index].Servers = accepted
+		completed += chunkLen
 		if progress != nil {
-			progress(c.Index+1, total)
+			progress(completed, totalBytes)
 		}
 	}
 	return nil
+}
+
+// progressReader wraps an io.Reader and reports cumulative bytes read.
+type progressReader struct {
+	r  io.Reader
+	n  int64
+	cb func(int64)
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	if n > 0 {
+		pr.n += int64(n)
+		if pr.cb != nil {
+			pr.cb(pr.n)
+		}
+	}
+	return n, err
 }
 
 // DownloadProgress is called after each chunk download.
