@@ -53,7 +53,11 @@ class BlossomService(private val httpClient: OkHttpClient) {
      * size; the only speed cost is losing inter-chunk download parallelism,
      * which is acceptable for background prefetch.
      */
-    suspend fun downloadAndDecrypt(earmark: Earmark, destFile: File): DownloadResult =
+    suspend fun downloadAndDecrypt(
+        earmark: Earmark,
+        destFile: File,
+        privKeyHex: String
+    ): DownloadResult =
         withContext(Dispatchers.IO) {
             val manifest = earmark.blossom
                 ?: return@withContext DownloadResult.Unavailable("No blossom manifest")
@@ -68,7 +72,7 @@ class BlossomService(private val httpClient: OkHttpClient) {
                 FileOutputStream(destFile).use { out ->
                     var terminal: DownloadResult? = null
                     for (chunk in orderedChunks) {
-                        when (val r = downloadChunk(chunk)) {
+                        when (val r = downloadChunk(chunk, privKeyHex)) {
                             is ChunkFetchResult.AllNotFound -> {
                                 terminal = DownloadResult.Orphaned(chunk.sha256)
                                 break
@@ -198,7 +202,7 @@ class BlossomService(private val httpClient: OkHttpClient) {
         data class TransientFailure(val message: String) : ChunkFetchResult()
     }
 
-    private fun downloadChunk(chunk: Chunk): ChunkFetchResult {
+    private fun downloadChunk(chunk: Chunk, privKeyHex: String): ChunkFetchResult {
         // Assume everything's a 404 until we see evidence otherwise. Any non-404
         // response (timeout, 5xx, SHA mismatch, empty body, IO error) flips this
         // to false so we return TransientFailure instead of declaring orphan.
@@ -211,7 +215,14 @@ class BlossomService(private val httpClient: OkHttpClient) {
         for (server in chunk.servers) {
             try {
                 val url = "${server.trimEnd('/')}/${chunk.sha256}"
-                val request = Request.Builder().url(url).build()
+                // Sign a BUD "get" authorization: servers with a pubkey
+                // allowlist (e.g. the self-hosted primary) reject anonymous
+                // GETs with 401; public servers ignore the header.
+                val token = blossomAuthToken(privKeyHex, chunk.sha256, "get")
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Nostr $token")
+                    .build()
                 httpClient.newCall(request).execute().use { response ->
                     when {
                         response.isSuccessful -> {
