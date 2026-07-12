@@ -169,7 +169,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     for ((i, earmark) in uncached.withIndex()) {
                         val destFile = cache.targetFile(earmark)
                         val result = try {
-                            blossomService.downloadAndDecrypt(earmark, destFile)
+                            blossomService.downloadAndDecrypt(earmark, destFile, privKeyHex)
                         } catch (e: Exception) {
                             BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
                         }
