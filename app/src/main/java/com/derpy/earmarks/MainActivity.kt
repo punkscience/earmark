@@ -5,18 +5,26 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.derpy.earmarks.ui.AppState
 import com.derpy.earmarks.ui.KeyEntryScreen
 import com.derpy.earmarks.ui.MainViewModel
 import com.derpy.earmarks.ui.PlayerScreen
+import com.derpy.earmarks.ui.SplashScreen
+import com.derpy.earmarks.ui.theme.EarmarksTheme
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,29 +34,43 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MaterialTheme {
-                Surface(Modifier.fillMaxSize().safeDrawingPadding()) {
-                    val vm: MainViewModel = viewModel()
-                    val appState by vm.state.collectAsState()
-                    val playerState by vm.playerState.collectAsState()
-                    val stats by vm.stats.collectAsState()
-                    val notice by vm.notice.collectAsState()
+            EarmarksTheme {
+                Surface(Modifier.fillMaxSize()) {
+                    // Branded splash: build dots + "earmarks" wordmark on the ink
+                    // ground. Hands off to the app once the brief beat elapses.
+                    var showSplash by remember { mutableStateOf(true) }
+                    LaunchedEffect(Unit) {
+                        delay(1400)
+                        showSplash = false
+                    }
 
-                    if (appState is AppState.KeyMissing) {
-                        KeyEntryScreen(onSaveKey = { vm.saveKey(it) })
-                    } else {
-                        PlayerScreen(
-                            appState = appState,
-                            playerState = playerState,
-                            stats = stats,
-                            notice = notice,
-                            onDismissNotice = { vm.dismissNotice() },
-                            onPlayPause = { vm.player.playPause() },
-                            onSkipNext = { vm.player.skipNext() },
-                            onSkipPrevious = { vm.player.skipPrevious() },
-                            onDeleteCurrent = { vm.deleteCurrent() },
-                            onClearKey = { vm.clearKey() }
-                        )
+                    Surface(Modifier.fillMaxSize().safeDrawingPadding()) {
+                        val vm: MainViewModel = viewModel()
+                        val appState by vm.state.collectAsState()
+                        val playerState by vm.playerState.collectAsState()
+                        val stats by vm.stats.collectAsState()
+                        val notice by vm.notice.collectAsState()
+
+                        if (appState is AppState.KeyMissing) {
+                            KeyEntryScreen(onSaveKey = { vm.saveKey(it) })
+                        } else {
+                            PlayerScreen(
+                                appState = appState,
+                                playerState = playerState,
+                                stats = stats,
+                                notice = notice,
+                                onDismissNotice = { vm.dismissNotice() },
+                                onPlayPause = { vm.player.playPause() },
+                                onSkipNext = { vm.player.skipNext() },
+                                onSkipPrevious = { vm.player.skipPrevious() },
+                                onDeleteCurrent = { vm.deleteCurrent() },
+                                onClearKey = { vm.clearKey() }
+                            )
+                        }
+                    }
+
+                    AnimatedVisibility(visible = showSplash, exit = fadeOut()) {
+                        Surface(Modifier.fillMaxSize()) { SplashScreen() }
                     }
                 }
             }

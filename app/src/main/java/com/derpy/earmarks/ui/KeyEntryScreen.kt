@@ -41,9 +41,9 @@ fun KeyEntryScreen(onSaveKey: (String) -> Result<Unit>) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("earmarks", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(8.dp))
-        Text("Paste your Nostr private key to get started.",
+        Wordmark(fontSizeSp = 36)
+        Spacer(Modifier.height(12.dp))
+        Text("paste your nostr private key to get started.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(32.dp))
@@ -67,7 +67,7 @@ fun KeyEntryScreen(onSaveKey: (String) -> Result<Unit>) {
             enabled = input.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Connect")
+            Text("connect")
         }
     }
 }

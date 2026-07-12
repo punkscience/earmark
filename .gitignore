@@ -16,6 +16,7 @@ local.properties
 *.iws
 *.ipr
 .DS_Store
+.claude/
 
 # Signing
 *.jks
@@ -26,3 +27,4 @@ app/src/main/assets/
 
 # Standalone Gradle install (not needed, project uses wrapper)
 ~/gradle/
+.kotlin/

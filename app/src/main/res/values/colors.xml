@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="splash_background">#FFFFFFFF</color>
+    <!--
+      Window-background colour shown around the masked icon on the Android 12+
+      splash screen. Punk Science ink ground (#0E0E10) so the splash matches the
+      reversed-on-ink lockup and the in-app branded splash.
+    -->
+    <color name="splash_background">#0E0E10</color>
 </resources>

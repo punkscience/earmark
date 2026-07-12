@@ -42,6 +42,9 @@ class PlayerController(private val context: Context) {
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
+    /** Returns the shuffled list that matches the player's current timeline order. */
+    fun getShuffledEarmarks(): List<Earmark> = shuffledEarmarks.toList()
+
     /** Returns the earmark currently playing, or null if nothing is loaded. */
     fun currentEarmark(): Earmark? {
         val mc = controller ?: return null
@@ -103,17 +106,44 @@ class PlayerController(private val context: Context) {
     }
 
     fun setPlaylist(files: List<Pair<File, Earmark>>) {
+        val mc = controller ?: return
+
+        // If we already have a populated timeline and the player is active (playing/ready/buffering),
+        // we can preserve the active session's playlist so we don't interrupt active background/Auto playback.
+        if (mc.mediaItemCount > 0 && (mc.isPlaying || mc.playbackState == Player.STATE_BUFFERING || mc.playbackState == Player.STATE_READY)) {
+            shuffledEarmarks.clear()
+            val timeline = mc.currentTimeline
+            val window = Timeline.Window()
+            for (i in 0 until mc.mediaItemCount) {
+                val mediaItem = mc.getMediaItemAt(i)
+                val ts = mediaItem.mediaId.toLongOrNull()
+                val earmark = files.firstOrNull { it.second.ts == ts }?.second
+                if (earmark != null) {
+                    shuffledEarmarks.add(earmark)
+                }
+            }
+            // If we successfully mapped the active session's playlist, sync our states and keep it running
+            if (shuffledEarmarks.size == mc.mediaItemCount) {
+                _state.value = _state.value.copy(totalTracks = shuffledEarmarks.size)
+                updateState()
+                return
+            }
+        }
+
         val shuffled = files.shuffled()
         shuffledEarmarks.clear()
         shuffledEarmarks.addAll(shuffled.map { it.second })
         val items = shuffled.map { (file, earmark) ->
             MediaItem.Builder()
+                .setMediaId(earmark.ts.toString())
                 .setUri(Uri.fromFile(file))
                 .setMediaMetadata(
                     MediaMetadata.Builder()
                         .setTitle(earmark.title.ifBlank { file.name })
                         .setArtist(earmark.artist.ifBlank { null })
                         .setAlbumTitle(earmark.album.ifBlank { null })
+                        .setIsPlayable(true)
+                        .setIsBrowsable(false)
                         .build()
                 )
                 .build()
@@ -121,7 +151,7 @@ class PlayerController(private val context: Context) {
         // Load the playlist ready to play but DON'T start automatically.
         // The user controls when playback begins via the play button — autoplay
         // was startling, especially when coming back to the app in the car.
-        controller?.run {
+        mc.run {
             setMediaItems(items)
             prepare()
         }

@@ -64,8 +64,8 @@ Connect to one or more Nostr relays via WebSocket and send:
 
 **Default relays** (use any, or all in parallel):
 ```
+wss://relay.towerofsong.ca
 wss://relay.damus.io
-wss://nos.lol
 wss://relay.primal.net
 wss://nostr.wine
 ```
@@ -357,7 +357,7 @@ Play
 | AES key size | 32 bytes (AES-256) |
 | AES-GCM nonce size | 12 bytes |
 | AES-GCM tag size | 16 bytes |
-| Default relays | damus.io, nos.lol, relay.primal.net, nostr.wine |
+| Default relays | relay.towerofsong.ca, damus.io, relay.primal.net, nostr.wine |
 | Default Blossom servers | blossom.band, cdn.satellite.earth, nostr.build |
 
 ---
