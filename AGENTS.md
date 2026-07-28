@@ -38,7 +38,7 @@ Changing any of these breaks the other client. Verify both sides before touching
 | File key | AES-256-GCM, 32 bytes, base64 in `blossom.key` |
 | Blossom auth | kind 24242 signed tokens (BUD-01/11), on both upload and download |
 | Blossom server discovery | kind 10063, unioned with built-in defaults |
-| Default relays | `wss://relay.towerofsong.ca`, `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://nostr.wine` |
+| Default relays | `wss://relay.towerofsong.ca`, `wss://relay.primal.net` |
 | Default Blossom servers | `blossom.towerofsong.ca` (primary), `blossom.band`, `cdn.satellite.earth` |
 | Earmark lifetime | 30 days, auto-purged |
 | Channel state event | `30001`, `d` tag = `"earmark-channels"`, self-encrypted like the earmark list |

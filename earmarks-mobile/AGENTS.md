@@ -112,7 +112,7 @@ The rust-nostr Android SDK (`org.rust-nostr:nostr-sdk`) doesn't yet expose NIP-4
 | NIP-44 message key length | 76 bytes → [0:32] chacha key, [32:44] chacha nonce, [44:76] hmac key |
 | Chunk format | `[12-byte nonce][ciphertext][16-byte GCM tag]` |
 | AES key | 32 bytes, base64-decoded from `blossom.key` |
-| Default relays | `wss://relay.towerofsong.ca`, `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://nostr.wine` |
+| Default relays | `wss://relay.towerofsong.ca`, `wss://relay.primal.net` |
 
 ## Agent skills
 

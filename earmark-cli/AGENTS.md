@@ -65,7 +65,7 @@ Input (file or playlist entry)
 - NIP-44 self-encryption: earmark list is ciphertext on relays; only the key holder can read it
 - NIP-65 relay discovery for relay selection
 - kind-10063 for Blossom server discovery (unioned with built-in defaults)
-- Built-in relay defaults: `relay.towerofsong.ca`, `relay.damus.io`, `relay.primal.net`, `nostr.wine`
+- Built-in relay defaults: `relay.towerofsong.ca`, `relay.primal.net`
 - Built-in Blossom server defaults: `blossom.towerofsong.ca` (primary), `blossom.band`, `cdn.satellite.earth`
 
 ### Offline queue

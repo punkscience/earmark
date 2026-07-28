@@ -477,3 +477,32 @@ func TestPostExpiry(t *testing.T) {
 		t.Error("a 31-day-old post is not expired")
 	}
 }
+
+// TestPostRecipientsIncludeSender verifies a post fans out to every member,
+// the sender included — a channel is a group the sender participates in, so
+// their own other devices must receive the post too.
+func TestPostRecipientsIncludeSender(t *testing.T) {
+	ch := &Channel{
+		Descriptor: ChannelDescriptor{ID: "chan1", Name: "Family Jams", Creator: "self"},
+		Members:    []string{"self", "friend"},
+	}
+	got, err := postRecipients(ch, "self")
+	if err != nil {
+		t.Fatalf("postRecipients: %v", err)
+	}
+	if len(got) != 2 || got[0] != "self" || got[1] != "friend" {
+		t.Errorf("recipients = %v, want [self friend]", got)
+	}
+}
+
+// TestPostRecipientsRejectSoloChannel verifies posting into a room with nobody
+// else is still an error — the personal earmark list already covers that.
+func TestPostRecipientsRejectSoloChannel(t *testing.T) {
+	ch := &Channel{
+		Descriptor: ChannelDescriptor{ID: "chan1", Name: "Just Me", Creator: "self"},
+		Members:    []string{"self"},
+	}
+	if _, err := postRecipients(ch, "self"); err == nil {
+		t.Error("posting into a members-of-one channel was allowed")
+	}
+}

@@ -15,11 +15,13 @@ import (
 	"time"
 )
 
+// defaultRelays deliberately stays short. relay.damus.io has been serving
+// intermittent 503s and nostr.wine is pay-to-write, so events published there
+// by non-members are silently absent — a relay that holds none of your events
+// is worse than no relay, because readers still wait on it.
 var defaultRelays = []string{
 	"wss://relay.towerofsong.ca",
-	"wss://relay.damus.io",
 	"wss://relay.primal.net",
-	"wss://nostr.wine",
 }
 
 // defaultBlossomServers is the fallback list used when the host has not
