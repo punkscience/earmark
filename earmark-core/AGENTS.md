@@ -19,7 +19,7 @@ Module path is `github.com/punkscience/earmark/earmark-core`. `earmark-cli` reso
 
 | File | Role |
 |------|------|
-| `settings.go` | `Settings` + `Configure` — the only configuration seam. Relay list, Blossom server list, upload idle timeout, and their defaults. |
+| `settings.go` | `Settings` + `Configure` — the only configuration seam. Relay list, Blossom server list, upload idle timeout, cache directory, and their defaults. |
 | `keys.go` | nsec/npub ↔ hex conversion, pubkey derivation |
 | `relay.go` | Relay publish/query helpers, the NIP-65 outbox relay set, NIP-02 follow list, kind-1 notes |
 | `blossom.go` | AES-256-GCM chunk encryption, 16 MiB chunking, BUD-01/11 upload/download/delete, kind-24242 auth tokens, kind-10063 server discovery, reassembly |
@@ -39,6 +39,8 @@ core.Configure(core.Settings{
 
 Empty fields fall back to built-in defaults. Call it again after any config change — `earmark-cli` does this from `SaveConfig`.
 
+`Settings.CacheDir` is where the core may write small caches (currently the NIP-65 lookup). It is optional, but a host that omits it gets an in-memory cache only — worthless to a short-lived CLI, which exits before it can ever be read back. That mistake made every `earmark channel` invocation repay the relay-list lookup.
+
 The one exception is `EARMARK_UPLOAD_IDLE_TIMEOUT` (seconds), read directly from the environment because it applies identically to every host and overrides the configured value.
 
 ## The outbox model
@@ -51,8 +53,17 @@ find them.
 
 kind-10002 lookups also query indexer relays (purplepag.es, relay.nostr.band),
 because the relay list was probably published from a different client. Lookups
-are TTL-cached for 15 minutes, empty results included, so an offline session
-does not pay the timeout on every publish.
+are TTL-cached for 15 minutes — in memory, and on disk when `Settings.CacheDir`
+is set — with empty results cached too, so an offline session does not pay the
+timeout on every publish.
+
+**`QueryRelays` does not wait for every relay.** Draining all of them means one
+dead or slow relay costs the caller the whole context timeout on every query;
+adding the indexer relays made that near-certain, and it turned a channel
+command into 20 seconds of silence. Once an answer is in hand, stragglers get a
+2-second grace period and are then abandoned. The trade is that a newer event
+sitting only on a very slow relay can be missed, which for addressable events
+resolves itself on the next query.
 
 > **Gift wraps deliberately do not use this.** Channel messages go to the
 > *recipient*, so the correct target is their inbox relays (NIP-17 kind 10050),

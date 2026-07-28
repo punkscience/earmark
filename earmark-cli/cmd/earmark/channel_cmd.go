@@ -62,6 +62,14 @@ func channelContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), channelTimeout)
 }
 
+// step reports what the command is waiting on. Channel operations are several
+// relay round-trips deep and used to print nothing until they finished, which
+// is indistinguishable from a hang. Goes to stderr so piping stdout stays
+// clean.
+func step(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "… "+format+"\n", args...)
+}
+
 func channelCreateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "create <name>",
@@ -74,10 +82,12 @@ func channelCreateCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("reading channel state from relays")
 			ch, err := core.CreateChannel(ctx, hexKey, args[0])
 			if err != nil {
 				return err
 			}
+			step("published")
 			fmt.Printf("Created channel %q (%s)\n", ch.Descriptor.Name, ch.Descriptor.ID[:12])
 			fmt.Printf("Invite someone:  earmark channel invite %q <npub>\n", ch.Descriptor.Name)
 			return nil
@@ -97,6 +107,7 @@ func channelListCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("reading channel state from relays")
 			st, err := core.LoadChannelState(ctx, hexKey)
 			if err != nil {
 				return err
@@ -179,6 +190,7 @@ func channelInviteCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("reading channel state, then sending an encrypted invite")
 			if err := core.InviteToChannel(ctx, hexKey, args[0], memberPub); err != nil {
 				return err
 			}
@@ -205,6 +217,7 @@ func channelRemoveCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("updating the roster and notifying members")
 			if err := core.RemoveFromChannel(ctx, hexKey, args[0], memberPub); err != nil {
 				return err
 			}
@@ -248,6 +261,7 @@ func channelInvitesCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("fetching gift wraps")
 			_, st, err := core.SyncChannels(ctx, hexKey)
 			if err != nil {
 				return err
@@ -356,6 +370,7 @@ is one small event per member.`,
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("wrapping and publishing to each member")
 			if err := core.PostToChannel(ctx, hexKey, args[0], *match); err != nil {
 				return err
 			}
@@ -416,6 +431,7 @@ func channelFeedCmd() *cobra.Command {
 			}
 			ctx, cancel := channelContext()
 			defer cancel()
+			step("fetching gift wraps")
 			posts, st, err := core.SyncChannels(ctx, hexKey)
 			if err != nil {
 				return err

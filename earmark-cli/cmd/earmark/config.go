@@ -17,10 +17,14 @@ func configureCore() {
 	if err != nil {
 		cfg = &Config{}
 	}
+	dir, _ := configDir()
 	core.Configure(core.Settings{
 		Relays:            cfg.NostrRelays,
 		BlossomServers:    cfg.BlossomServers,
 		UploadIdleTimeout: time.Duration(cfg.UploadIdleTimeoutSeconds) * time.Second,
+		// Without this the NIP-65 lookup is repaid on every invocation — the
+		// in-memory cache dies with the process.
+		CacheDir: dir,
 	})
 }
 

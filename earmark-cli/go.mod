@@ -1,4 +1,4 @@
-module ca.punkscience.earmark
+module github.com/punkscience/earmark/earmark-cli
 
 go 1.26.3
 

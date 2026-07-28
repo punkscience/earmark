@@ -15,8 +15,8 @@ type selectorItem struct {
 
 // selectorModel is the Bubble Tea model for interactive file selection.
 type selectorModel struct {
-	items   []selectorItem
-	cursor  int
+	items    []selectorItem
+	cursor   int
 	quitting bool
 }
 

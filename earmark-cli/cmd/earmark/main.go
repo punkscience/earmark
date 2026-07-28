@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"ca.punkscience.earmark/internal/filter"
+	"github.com/punkscience/earmark/earmark-cli/internal/filter"
 	"github.com/spf13/cobra"
 
 	core "github.com/punkscience/earmark/earmark-core"

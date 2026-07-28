@@ -2,7 +2,10 @@ package earmark
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -55,9 +58,26 @@ func PublishToRelays(ctx context.Context, relays []string, ev nostr.Event) error
 	return nil
 }
 
+// queryStragglerGrace is how long QueryRelays keeps waiting for slower relays
+// once it already has an answer.
+const queryStragglerGrace = 2 * time.Second
+
 // QueryRelays queries every relay concurrently and returns the single newest
 // matching event, or nil when none matched.
+//
+// It does not wait for every relay. Draining all of them means one dead or
+// slow relay costs the caller the entire context timeout on every single
+// query — which is exactly what happens with the NIP-65 indexer relays. Once
+// an answer is in hand, stragglers get queryStragglerGrace to beat it and are
+// then abandoned.
+//
+// The trade is that a newer event sitting only on a very slow relay can be
+// missed. For addressable events that resolves itself on the next query, and
+// it is a far better failure mode than every command blocking for 20 seconds.
 func QueryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nostr.Event {
+	if len(relays) == 0 {
+		return nil
+	}
 	ch := make(chan *nostr.Event, len(relays))
 	for _, u := range relays {
 		u := u
@@ -76,11 +96,26 @@ func QueryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nos
 			ch <- evs[0]
 		}()
 	}
+
 	var latest *nostr.Event
-	for range relays {
-		ev := <-ch
-		if ev != nil && (latest == nil || ev.CreatedAt > latest.CreatedAt) {
-			latest = ev
+	var settle <-chan time.Time
+	for replies := 0; replies < len(relays); {
+		select {
+		case ev := <-ch:
+			replies++
+			if ev != nil && (latest == nil || ev.CreatedAt > latest.CreatedAt) {
+				latest = ev
+			}
+			// Start the grace clock on the first usable answer.
+			if latest != nil && settle == nil {
+				timer := time.NewTimer(queryStragglerGrace)
+				defer timer.Stop()
+				settle = timer.C
+			}
+		case <-settle:
+			return latest
+		case <-ctx.Done():
+			return latest
 		}
 	}
 	return latest
@@ -191,6 +226,61 @@ var nip65Cache = struct {
 // nip65CacheTTL is how long a cached NIP-65 lookup stays fresh.
 const nip65CacheTTL = 15 * time.Minute
 
+// nip65LookupTimeout bounds the relay-list lookup. It is an optimisation, not a
+// requirement — the configured relays always work as a fallback — so it should
+// never be the reason a command feels slow.
+const nip65LookupTimeout = 5 * time.Second
+
+// nip65DiskCache is the on-disk form of the lookup cache.
+type nip65DiskCache struct {
+	PubHex    string    `json:"pubhex"`
+	Relays    []string  `json:"relays"`
+	FetchedAt time.Time `json:"fetched_at"`
+}
+
+func nip65CachePath() string {
+	dir := CacheDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "nip65-cache.json")
+}
+
+// readNip65Disk returns cached write relays for pubHex when a fresh entry
+// exists on disk. The in-memory cache is useless to a CLI, which exits before
+// it can ever be read a second time.
+func readNip65Disk(pubHex string) ([]string, bool) {
+	path := nip65CachePath()
+	if path == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var c nip65DiskCache
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, false
+	}
+	if c.PubHex != pubHex || time.Since(c.FetchedAt) >= nip65CacheTTL {
+		return nil, false
+	}
+	return c.Relays, true
+}
+
+func writeNip65Disk(pubHex string, relays []string) {
+	path := nip65CachePath()
+	if path == "" {
+		return
+	}
+	data, err := json.Marshal(nip65DiskCache{pubHex, relays, time.Now()})
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, data, 0o600)
+}
+
 // UserPublishRelays returns the outbox relay set for the user's own events:
 // their NIP-65 write relays unioned with the configured relay list.
 //
@@ -210,7 +300,14 @@ func UserPublishRelays(pubHex string) []string {
 	}
 	nip65Cache.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	if cached, ok := readNip65Disk(pubHex); ok {
+		nip65Cache.Lock()
+		nip65Cache.pubHex, nip65Cache.relays, nip65Cache.fetchedAt = pubHex, cached, time.Now()
+		nip65Cache.Unlock()
+		return unionStrings(cached, Relays())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nip65LookupTimeout)
 	writeRelays := FetchUserWriteRelays(ctx, pubHex)
 	cancel()
 
@@ -219,6 +316,7 @@ func UserPublishRelays(pubHex string) []string {
 	nip65Cache.relays = writeRelays
 	nip65Cache.fetchedAt = time.Now()
 	nip65Cache.Unlock()
+	writeNip65Disk(pubHex, writeRelays)
 
 	return unionStrings(writeRelays, Relays())
 }

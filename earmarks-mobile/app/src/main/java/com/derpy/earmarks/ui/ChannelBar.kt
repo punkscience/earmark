@@ -68,6 +68,16 @@ fun ChannelSourceBar(
             )
         }
 
+        // With no channels and no invites the row is a lone "My Earmarks" chip,
+        // which gives no hint the feature exists. Say where channels come from.
+        if (channelState.channels.isEmpty() && channelState.pendingInviteCount == 0) {
+            Text(
+                "Channels are created from the desktop app",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(start = 8.dp, top = 10.dp)
+            )
+        }
+
         if (channelState.pendingInviteCount > 0) {
             BadgedBox(badge = { Badge { Text("${channelState.pendingInviteCount}") } }) {
                 FilterChip(

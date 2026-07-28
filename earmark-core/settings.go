@@ -53,6 +53,11 @@ type Settings struct {
 	// a slow-but-steady upload runs indefinitely and only a stalled connection
 	// is killed.
 	UploadIdleTimeout time.Duration
+	// CacheDir is a directory the core may write small caches into, such as the
+	// NIP-65 relay-list lookup. Optional: with it unset the caches live only in
+	// memory, which is useless to a short-lived CLI process — every invocation
+	// would pay the lookup again.
+	CacheDir string
 }
 
 var (
@@ -66,6 +71,14 @@ func Configure(s Settings) {
 	settingsMu.Lock()
 	settings = s
 	settingsMu.Unlock()
+}
+
+// CacheDir returns the directory the core may write caches into, or "" when
+// the host has not offered one.
+func CacheDir() string {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	return settings.CacheDir
 }
 
 // Relays returns the configured relay list, or the built-in defaults.

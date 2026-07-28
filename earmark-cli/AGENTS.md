@@ -22,12 +22,12 @@ What stays here:
 
 | File | Role |
 |------|------|
-| `main.go` | Cobra command tree |
-| `config.go` | Config file I/O (`~/.config/earmark/config.json`) and `configureCore()`, which pushes it into the core |
-| `key.go` | Key resolution order: `EARMARK_NOSTR_KEY` → config file |
-| `earmark_queue.go` | Offline queue (`~/.config/earmark/queue.json`), transactional-outbox pattern, flush-on-connectivity |
-| `uploader.go` | Drives the core's prepare → upload → record pipeline, with terminal progress |
-| `scanner.go`, `playlist.go`, `selector.go`, `upload_tui.go`, `internal/filter` | Finding files on disk and choosing between them |
+| `cmd/earmark/main.go` | Cobra command tree; `main` lives under `cmd/` so `go install` names the binary `earmark` |
+| `cmd/earmark/config.go` | Config file I/O (`~/.config/earmark/config.json`) and `configureCore()`, which pushes it into the core |
+| `cmd/earmark/key.go` | Key resolution order: `EARMARK_NOSTR_KEY` → config file |
+| `cmd/earmark/earmark_queue.go` | Offline queue (`~/.config/earmark/queue.json`), transactional-outbox pattern, flush-on-connectivity |
+| `cmd/earmark/uploader.go` | Drives the core's prepare → upload → record pipeline, with terminal progress |
+| `cmd/earmark/{scanner,playlist,selector,upload_tui}.go`, `internal/filter` | Finding files on disk and choosing between them |
 
 **The core reads no config files.** `configureCore()` is what makes the user's relay and Blossom server lists take effect; it runs at startup in `main()` and again from `SaveConfig`. Adding a new core setting means adding it to `core.Settings` *and* to `configureCore`, or it silently does nothing.
 
@@ -76,12 +76,17 @@ Input (file or playlist entry)
 
 ## Build & run
 
-Run from `earmark-cli/`. The module is rooted here (`ca.punkscience.earmark`); the repo-root `go.work` joins it to `earmark-core`, and a `replace` directive in `go.mod` keeps the build working outside the workspace.
+Run from `earmark-cli/`. The module is `github.com/punkscience/earmark/earmark-cli`; the repo-root `go.work` joins it to `earmark-core`, and a `replace` directive in `go.mod` keeps the build working outside the workspace.
 
 ```bash
-go build -o earmark
+go build -o earmark ./cmd/earmark
 go test ./...
+
+# or install it
+go install github.com/punkscience/earmark/earmark-cli/cmd/earmark@latest
 ```
+
+> **Why `cmd/earmark/`.** Go names an installed binary after the last element of its import path. The module used to be `ca.punkscience.earmark`, so `go install` produced a binary literally called `ca.punkscience.earmark` sitting uselessly next to the real one — a trap that cost real debugging time. `main` living in `cmd/earmark/` is what makes `go install` produce `earmark`.
 
 Most protocol tests live in `earmark-core` — run those too when you change anything shared.
 

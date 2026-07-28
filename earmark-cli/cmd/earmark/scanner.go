@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ca.punkscience.earmark/internal/filter"
+	"github.com/punkscience/earmark/earmark-cli/internal/filter"
 )
 
 var audioExts = map[string]bool{
