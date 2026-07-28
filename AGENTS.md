@@ -48,6 +48,8 @@ Changing any of these breaks the other client. Verify both sides before touching
 | Roster authority | Channel creator only, ordered by monotonic `seq` |
 | Channel post lifetime | 30 days from `posted_at`; sender pins the chunks against their own purge |
 | Gift wrap query window | `now - 32 days` — 30 days of content plus 2 days of maximum backdating |
+| Gift wrap delivery | To the **recipient's** NIP-17 kind-10050 relays ∪ configured — never the sender's outbox |
+| Own-event publishing | NIP-65 kind-10002 write relays ∪ configured (outbox model) |
 
 ## Build
 

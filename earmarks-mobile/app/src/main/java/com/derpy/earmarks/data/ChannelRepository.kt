@@ -48,7 +48,14 @@ class ChannelRepository(private val nostr: NostrService) {
         val now = System.currentTimeMillis() / 1000
 
         val since = now - CHANNEL_POST_MAX_AGE_SECONDS - GiftWrap.QUERY_BACKDATE_SECONDS
-        val wraps = nostr.fetchGiftWraps(myPub, since)
+        // Gift wraps land on the relays we advertise as our inbox, which is
+        // where other people's clients were told to send them.
+        val inbox = try {
+            nostr.fetchInboxRelays(myPub)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        val wraps = nostr.fetchGiftWraps(myPub, since, inbox)
 
         var changed = false
         dropExpiredPins(state, now)?.let { state = it; changed = true }

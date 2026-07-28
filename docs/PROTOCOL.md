@@ -355,6 +355,8 @@ Play
 | Unknown envelope `v` or `type` | Ignore the message — forward compatibility, not a failure |
 | Channel has no posts | Show "Tracks posted from now on will appear here" — there is no backfill by design |
 | Blossom server lacks `PUT /mirror` | Fall back to download-verify-upload for Keep |
+| Recipient has no kind-10050 list | Fall back to the configured relays, and tell the user delivery is a guess |
+| A relay in the query set is unresponsive | Do not block on it — return once an answer is in hand |
 
 ---
 
@@ -521,11 +523,32 @@ Both the seal and the gift wrap carry a randomised `created_at` in the past, so 
 
 **Receivers must therefore never order or expire channel content by `created_at`.** Use `posted_at` from inside the rumor. Query windows must allow for the maximum backdating: to see 30 days of posts, query `since: now - 32 days`.
 
+### Relay selection
+
+Gift wraps are the one place where "publish to the configured relays" is wrong.
+
+A wrap is addressed to its **recipient**, so it belongs on relays that recipient reads — their **NIP-17 kind-10050 DM relay list** — not on the sender's outbox and not on whatever the sending install happens to be configured with. Publishing to the sender's relays works only when both parties happen to share one, and fails **silently** otherwise: the publish succeeds, and the message is never seen.
+
+| Operation | Relays |
+|---|---|
+| Publish a gift wrap | the **recipient's** kind-10050 list, unioned with the configured set |
+| Read gift wraps addressed to you | **your own** kind-10050 list, unioned with the configured set |
+| Publish the earmark list or channel state | the **sender's** NIP-65 kind-10002 write relays ∪ configured (outbox model) |
+| Look up a kind-10002 or kind-10050 | configured ∪ indexer relays (`purplepag.es`, `relay.nostr.band`) |
+
+A recipient with no kind-10050 falls back to the configured set. That is a guess, and clients **should** say so — otherwise the first symptom is a friend who never receives anything and no error anywhere.
+
+Relay-list lookups are cached with a 15-minute TTL, **including empty results**. Without caching the negative, the common case — a user who has published no list — costs a full lookup timeout on every single operation.
+
+Clients must not publish a kind-10050 automatically. The list may have been curated in the user's primary Nostr client, and a music tool has no business overwriting it. Offer it as an explicit action.
+
 ### Receiving
 
 ```json
 { "kinds": [1059], "#p": ["<my pubkey>"], "since": <now - 32 days> }
 ```
+
+sent to your own inbox relays (above).
 
 For each gift wrap:
 
@@ -604,6 +627,10 @@ Web of trust does **not** grant access and is not a discovery mechanism. Members
 | Gift wrap query window | `now - 32 days` (30-day content + 2-day max backdating) |
 | Channel post lifetime | 30 days from `posted_at` |
 | Blossom mirror endpoint | `PUT /mirror` (BUD-04), kind-24242 auth |
+| Gift wrap delivery relays | recipient's NIP-17 kind-10050 list ∪ configured |
+| Outbox relays (own events) | NIP-65 kind-10002 write relays ∪ configured |
+| Relay-list indexers | `wss://purplepag.es`, `wss://relay.nostr.band` |
+| Relay-list cache TTL | 15 minutes, empty results included |
 | Chunk size (plaintext) | `16 * 1024 * 1024` bytes (16 MiB) |
 | Encrypted chunk overhead | 12 bytes (nonce) + 16 bytes (GCM tag) = 28 bytes |
 | AES key size | 32 bytes (AES-256) |

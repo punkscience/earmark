@@ -2,11 +2,7 @@ package earmark
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -213,74 +209,6 @@ func ParseWriteRelays(ev *nostr.Event) []string {
 	return relays
 }
 
-// nip65Cache memoises the user's NIP-65 write relays so repeated publishes in
-// one session don't re-query the network every time. Empty results are cached
-// too, so an offline session doesn't pay the lookup timeout on every publish.
-var nip65Cache = struct {
-	sync.Mutex
-	pubHex    string
-	relays    []string
-	fetchedAt time.Time
-}{}
-
-// nip65CacheTTL is how long a cached NIP-65 lookup stays fresh.
-const nip65CacheTTL = 15 * time.Minute
-
-// nip65LookupTimeout bounds the relay-list lookup. It is an optimisation, not a
-// requirement — the configured relays always work as a fallback — so it should
-// never be the reason a command feels slow.
-const nip65LookupTimeout = 5 * time.Second
-
-// nip65DiskCache is the on-disk form of the lookup cache.
-type nip65DiskCache struct {
-	PubHex    string    `json:"pubhex"`
-	Relays    []string  `json:"relays"`
-	FetchedAt time.Time `json:"fetched_at"`
-}
-
-func nip65CachePath() string {
-	dir := CacheDir()
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, "nip65-cache.json")
-}
-
-// readNip65Disk returns cached write relays for pubHex when a fresh entry
-// exists on disk. The in-memory cache is useless to a CLI, which exits before
-// it can ever be read a second time.
-func readNip65Disk(pubHex string) ([]string, bool) {
-	path := nip65CachePath()
-	if path == "" {
-		return nil, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	var c nip65DiskCache
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, false
-	}
-	if c.PubHex != pubHex || time.Since(c.FetchedAt) >= nip65CacheTTL {
-		return nil, false
-	}
-	return c.Relays, true
-}
-
-func writeNip65Disk(pubHex string, relays []string) {
-	path := nip65CachePath()
-	if path == "" {
-		return
-	}
-	data, err := json.Marshal(nip65DiskCache{pubHex, relays, time.Now()})
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	_ = os.WriteFile(path, data, 0o600)
-}
-
 // UserPublishRelays returns the outbox relay set for the user's own events:
 // their NIP-65 write relays unioned with the configured relay list.
 //
@@ -289,35 +217,13 @@ func writeNip65Disk(pubHex string, relays []string) {
 // happens to be configured with — otherwise another client, or the same app on
 // another machine, cannot find them.
 //
-// The NIP-65 lookup has its own short timeout and is TTL-cached. When it fails
-// or the user has no relay list, the configured relays are used alone.
+// The lookup is bounded and cached; see relaycache.go.
 func UserPublishRelays(pubHex string) []string {
-	nip65Cache.Lock()
-	if nip65Cache.pubHex == pubHex && time.Since(nip65Cache.fetchedAt) < nip65CacheTTL {
-		cached := nip65Cache.relays
-		nip65Cache.Unlock()
-		return unionStrings(cached, Relays())
-	}
-	nip65Cache.Unlock()
-
-	if cached, ok := readNip65Disk(pubHex); ok {
-		nip65Cache.Lock()
-		nip65Cache.pubHex, nip65Cache.relays, nip65Cache.fetchedAt = pubHex, cached, time.Now()
-		nip65Cache.Unlock()
-		return unionStrings(cached, Relays())
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), nip65LookupTimeout)
-	writeRelays := FetchUserWriteRelays(ctx, pubHex)
-	cancel()
-
-	nip65Cache.Lock()
-	nip65Cache.pubHex = pubHex
-	nip65Cache.relays = writeRelays
-	nip65Cache.fetchedAt = time.Now()
-	nip65Cache.Unlock()
-	writeNip65Disk(pubHex, writeRelays)
-
+	writeRelays := cachedRelayList(10002, pubHex, func() []string {
+		ctx, cancel := context.WithTimeout(context.Background(), relayListLookupTimeout)
+		defer cancel()
+		return FetchUserWriteRelays(ctx, pubHex)
+	})
 	return unionStrings(writeRelays, Relays())
 }
 

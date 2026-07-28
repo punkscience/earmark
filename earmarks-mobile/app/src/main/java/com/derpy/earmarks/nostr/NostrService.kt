@@ -38,6 +38,16 @@ private val DEFAULT_RELAYS = listOf(
  */
 private const val EARMARK_D_TAG = "derpy-earmarks"
 
+/**
+ * Read-only indexer relays that aggregate kind-10002/10050 relay lists. Queried
+ * alongside the defaults when looking one up, because the user probably
+ * published it from a different client.
+ */
+private val NIP65_INDEX_RELAYS = listOf(
+    "wss://purplepag.es",
+    "wss://relay.nostr.band"
+)
+
 class NostrService(private val httpClient: OkHttpClient) {
 
     /**
@@ -127,14 +137,54 @@ class NostrService(private val httpClient: OkHttpClient) {
         }
 
     /**
+     * Fetches the user's NIP-17 DM relay list (kind 10050) — the relays other
+     * clients were told to send them gift wraps on. Returns an empty list when
+     * none is published, in which case callers fall back to the defaults.
+     */
+    suspend fun fetchInboxRelays(pubKeyHex: String): List<String> = withContext(Dispatchers.IO) {
+        val subscriptionId = "inbox-${System.currentTimeMillis()}"
+        val reqMessage = JSONArray().apply {
+            put("REQ")
+            put(subscriptionId)
+            put(JSONObject().apply {
+                put("kinds", JSONArray().put(10050))
+                put("authors", JSONArray().put(pubKeyHex))
+                put("limit", 1)
+            })
+        }.toString()
+
+        val events = coroutineScope {
+            (DEFAULT_RELAYS + NIP65_INDEX_RELAYS).map {
+                async { queryRelay(it, reqMessage, subscriptionId) }
+            }.awaitAll()
+        }.filterNotNull()
+        val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext emptyList()
+
+        val tags = best.optJSONArray("tags") ?: return@withContext emptyList()
+        (0 until tags.length()).mapNotNull { i ->
+            val t = tags.optJSONArray(i) ?: return@mapNotNull null
+            // NIP-17 uses bare `relay` tags — no read/write markers.
+            if (t.length() >= 2 && t.optString(0) == "relay") t.optString(1) else null
+        }
+    }
+
+    /**
      * Fetches every kind-1059 gift wrap addressed to [pubKeyHex] since
      * [sinceEpochSeconds], deduplicated by event id.
      *
      * Unlike the earmark list this cannot collapse to a single newest event —
      * gift wraps are not addressable, every one of them is a distinct message,
      * and each relay may hold a different subset.
+     *
+     * Reads from [inboxRelays] when the user has published a NIP-17 list, since
+     * that is where senders were told to deliver. Falling back to the defaults
+     * means messages sent to a relay we do not read are simply never seen.
      */
-    suspend fun fetchGiftWraps(pubKeyHex: String, sinceEpochSeconds: Long): List<JSONObject> =
+    suspend fun fetchGiftWraps(
+        pubKeyHex: String,
+        sinceEpochSeconds: Long,
+        inboxRelays: List<String> = emptyList()
+    ): List<JSONObject> =
         withContext(Dispatchers.IO) {
             val subscriptionId = "gw-${System.currentTimeMillis()}"
             val reqMessage = JSONArray().apply {
@@ -147,8 +197,9 @@ class NostrService(private val httpClient: OkHttpClient) {
                 })
             }.toString()
 
+            val relays = (inboxRelays + DEFAULT_RELAYS).distinct()
             val perRelay = coroutineScope {
-                DEFAULT_RELAYS.map { async { queryRelayAll(it, reqMessage, subscriptionId) } }.awaitAll()
+                relays.map { async { queryRelayAll(it, reqMessage, subscriptionId) } }.awaitAll()
             }
             val seen = HashSet<String>()
             val out = mutableListOf<JSONObject>()

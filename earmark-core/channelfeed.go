@@ -99,7 +99,9 @@ func SyncChannels(ctx context.Context, hexPrivKey string) ([]ChannelPost, *Chann
 		Tags:  nostr.TagMap{"p": []string{pubHex}},
 		Since: &since,
 	}
-	wraps := QueryRelaysAll(ctx, Relays(), filter)
+	// Gift wraps addressed to us land on the relays we advertise as our inbox,
+	// which is where other people's clients were told to send them.
+	wraps := QueryRelaysAll(ctx, UserInboxRelays(pubHex), filter)
 
 	// Follows only decide how loudly an invite arrives. Failing to fetch them
 	// must not block the sync, so an empty list simply means "nothing trusted".
@@ -224,12 +226,23 @@ func KeepPost(ctx context.Context, hexPrivKey string, post *ChannelPost) error {
 	return AddEarmark(hexPrivKey, adopted)
 }
 
-// publishGiftWraps publishes wraps one at a time. Relays rate-limit bursts, and
-// a channel post fans out to every member at once, so this deliberately does
-// not parallelise.
+// publishGiftWraps publishes each wrap to the relays its recipient actually
+// reads (NIP-17 kind 10050), read off the wrap's own p tag.
+//
+// Publishing to the sender's relays instead only works when both parties
+// happen to share one. When they do not it fails silently — the publish
+// succeeds and the recipient never sees the message — which makes channels
+// unusable between two people on disjoint relay sets.
+//
+// Wraps go out one at a time. Relays rate-limit bursts, and a channel post
+// fans out to every member at once, so this deliberately does not parallelise.
 func publishGiftWraps(ctx context.Context, events []nostr.Event) error {
 	for _, ev := range events {
-		if err := PublishToRelays(ctx, Relays(), ev); err != nil {
+		relays := Relays()
+		if p := ev.Tags.GetFirst([]string{"p"}); p != nil && p.Value() != "" {
+			relays = UserInboxRelays(p.Value())
+		}
+		if err := PublishToRelays(ctx, relays, ev); err != nil {
 			return err
 		}
 	}

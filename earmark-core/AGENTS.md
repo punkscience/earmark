@@ -22,6 +22,8 @@ Module path is `github.com/punkscience/earmark/earmark-core`. `earmark-cli` reso
 | `settings.go` | `Settings` + `Configure` — the only configuration seam. Relay list, Blossom server list, upload idle timeout, cache directory, and their defaults. |
 | `keys.go` | nsec/npub ↔ hex conversion, pubkey derivation |
 | `relay.go` | Relay publish/query helpers, the NIP-65 outbox relay set, NIP-02 follow list, kind-1 notes |
+| `inbox.go` | NIP-17 kind-10050 inbox relays — where gift wraps are delivered and read |
+| `relaycache.go` | Shared TTL cache for kind-10002/10050 lookups, memory + disk |
 | `blossom.go` | AES-256-GCM chunk encryption, 16 MiB chunking, BUD-01/11 upload/download/delete, kind-24242 auth tokens, kind-10063 server discovery, reassembly |
 | `list.go` | The NIP-51 kind-30001 earmark list: NIP-44 self-encryption, CRUD, legacy-tag migration, 30-day purge |
 
@@ -65,11 +67,19 @@ command into 20 seconds of silence. Once an answer is in hand, stragglers get a
 sitting only on a very slow relay can be missed, which for addressable events
 resolves itself on the next query.
 
-> **Gift wraps deliberately do not use this.** Channel messages go to the
-> *recipient*, so the correct target is their inbox relays (NIP-17 kind 10050),
-> not the sender's outbox. They currently publish to the configured set, which
-> works when members share relays and does not when they do not. See the
-> follow-up issue.
+**Gift wraps use the opposite rule.** A channel message is for its *recipient*,
+so it goes to their NIP-17 kind-10050 inbox relays (`UserInboxRelays`), read off
+the wrap's own `p` tag — never the sender's outbox. Reading gift wraps uses your
+*own* kind-10050 list. See `inbox.go`.
+
+Both lookups share the cache in `relaycache.go`: 15-minute TTL, in memory and on
+disk, **including empty results**. A user with no published list is the common
+case, and not caching that negative made every command pay a lookup timeout.
+
+A recipient with no kind-10050 falls back to the configured set. That is a
+guess, and the CLI says so — the failure is otherwise completely silent on both
+ends. Clients never publish a kind-10050 automatically; it may have been curated
+in the user's primary client.
 
 ## Conventions
 
