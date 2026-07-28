@@ -536,11 +536,13 @@ A wrap is addressed to its **recipient**, so it belongs on relays that recipient
 | Publish the earmark list or channel state | the **sender's** NIP-65 kind-10002 write relays ∪ configured (outbox model) |
 | Look up a kind-10002 or kind-10050 | configured ∪ indexer relays (`purplepag.es`, `relay.nostr.band`) |
 
-A recipient with no kind-10050 falls back to the configured set. That is a guess, and clients **should** say so — otherwise the first symptom is a friend who never receives anything and no error anywhere.
+A recipient with no kind-10050 falls back to the configured set. That is a guess: the first symptom of it being wrong is a friend who never receives anything, with no error anywhere.
+
+So clients **must publish a kind-10050 for the user when they have none**, at the point they create or join a channel. Channels do not function without one, and requiring a user to know that is not a reasonable price for sharing a song.
+
+Clients **must not** overwrite an existing kind-10050. It governs NIP-17 direct messages across every one of that user's Nostr clients, not just this one — replacing a curated list with a music app's relay set can quietly break their DMs elsewhere. Absent means publish; present means leave alone. Overwriting is an explicit user action only.
 
 Relay-list lookups are cached with a 15-minute TTL, **including empty results**. Without caching the negative, the common case — a user who has published no list — costs a full lookup timeout on every single operation.
-
-Clients must not publish a kind-10050 automatically. The list may have been curated in the user's primary Nostr client, and a music tool has no business overwriting it. Offer it as an explicit action.
 
 ### Receiving
 

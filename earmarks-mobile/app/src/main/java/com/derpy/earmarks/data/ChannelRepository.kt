@@ -9,6 +9,17 @@ import kotlinx.coroutines.withContext
 
 private const val TAG = "ChannelRepository"
 
+/**
+ * Relays advertised as this user's NIP-17 inbox when they have published no
+ * list of their own. Matches the Go clients' defaults so both ends agree.
+ */
+private val DEFAULT_INBOX_RELAYS = listOf(
+    "wss://relay.towerofsong.ca",
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+    "wss://nostr.wine"
+)
+
 /** Result of a channel sync: the live posts plus the state they were judged against. */
 data class ChannelSync(val posts: List<ChannelPost>, val state: ChannelState)
 
@@ -50,11 +61,27 @@ class ChannelRepository(private val nostr: NostrService) {
         val since = now - CHANNEL_POST_MAX_AGE_SECONDS - GiftWrap.QUERY_BACKDATE_SECONDS
         // Gift wraps land on the relays we advertise as our inbox, which is
         // where other people's clients were told to send them.
-        val inbox = try {
+        var inbox = try {
             nostr.fetchInboxRelays(myPub)
         } catch (e: Exception) {
             emptyList()
         }
+
+        // Channels do not work without an inbox list — senders fall back to
+        // guessing and undelivered messages produce no error on either end. So
+        // publish one when there is none. An existing list is never touched:
+        // kind 10050 governs NIP-17 DMs in every one of this user's clients,
+        // not just ours.
+        if (inbox.isEmpty() && state.channels.isNotEmpty()) {
+            try {
+                if (nostr.publishInboxRelays(privKeyHex, DEFAULT_INBOX_RELAYS) > 0) {
+                    inbox = DEFAULT_INBOX_RELAYS
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "could not publish inbox relays: ${e.message}")
+            }
+        }
+
         val wraps = nostr.fetchGiftWraps(myPub, since, inbox)
 
         var changed = false
@@ -178,6 +205,14 @@ class ChannelRepository(private val nostr: NostrService) {
                     invites = state.invites.filterNot { it.descriptor.id == chanId }
                 )
             )
+            // Joining means intending to receive; make sure senders know where.
+            try {
+                if (nostr.fetchInboxRelays(Nip44.derivePubKeyHex(privKeyHex)).isEmpty()) {
+                    nostr.publishInboxRelays(privKeyHex, DEFAULT_INBOX_RELAYS)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "could not ensure inbox relays: ${e.message}")
+            }
             Result.success(channel)
         }
 

@@ -76,10 +76,15 @@ Both lookups share the cache in `relaycache.go`: 15-minute TTL, in memory and on
 disk, **including empty results**. A user with no published list is the common
 case, and not caching that negative made every command pay a lookup timeout.
 
-A recipient with no kind-10050 falls back to the configured set. That is a
-guess, and the CLI says so — the failure is otherwise completely silent on both
-ends. Clients never publish a kind-10050 automatically; it may have been curated
-in the user's primary client.
+`EnsureInboxRelays` publishes a kind-10050 when the user has none, and is called
+on create, on join, and on sync. Channels do not function without one and the
+failure is silent on both ends, so this is not left to the user.
+
+`PublishInboxRelays` overwrites, and is only ever reached through an explicit
+user action (`earmark channel inbox --publish`). kind-10050 governs NIP-17 DMs
+across all of that user's clients — replacing a curated list with a music app's
+relays could break their messaging elsewhere. **Absent means publish, present
+means hands off.**
 
 ## Conventions
 

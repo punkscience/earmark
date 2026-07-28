@@ -92,6 +92,13 @@ func SyncChannels(ctx context.Context, hexPrivKey string) ([]ChannelPost, *Chann
 		return nil, nil, err
 	}
 
+	// Heal installs that predate automatic publishing, and anyone who joined
+	// before ever running a channel command. Cached, so it is free once a list
+	// exists.
+	if len(st.Channels) > 0 {
+		_, _ = EnsureInboxRelays(ctx, hexPrivKey)
+	}
+
 	now := time.Now()
 	since := nostr.Timestamp(now.Add(-ChannelPostMaxAge).Unix() - GiftWrapQueryBackdate)
 	filter := nostr.Filter{

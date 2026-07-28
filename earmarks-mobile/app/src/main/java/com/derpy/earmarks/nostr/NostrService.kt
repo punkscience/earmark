@@ -169,6 +169,24 @@ class NostrService(private val httpClient: OkHttpClient) {
     }
 
     /**
+     * Publishes a NIP-17 DM relay list (kind 10050) naming [relays] as the
+     * places others should send this user gift wraps.
+     */
+    suspend fun publishInboxRelays(privKeyHex: String, relays: List<String>): Int =
+        withContext(Dispatchers.IO) {
+            if (relays.isEmpty()) return@withContext 0
+            publishEvent(
+                NostrEvent.build(
+                    privKeyHex = privKeyHex,
+                    kind = 10050,
+                    content = "",
+                    // NIP-17 uses bare `relay` tags — no read/write markers.
+                    tags = relays.map { listOf("relay", it) }
+                )
+            )
+        }
+
+    /**
      * Fetches every kind-1059 gift wrap addressed to [pubKeyHex] since
      * [sinceEpochSeconds], deduplicated by event id.
      *

@@ -71,26 +71,6 @@ func step(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "… "+format+"\n", args...)
 }
 
-// warnIfNoInbox tells the user when nobody can reliably reach them.
-//
-// Without a NIP-17 kind-10050 list, senders fall back to guessing — their own
-// configured relays — so channel messages arrive only if both parties happen
-// to share one. The failure is silent on both ends, which makes it worth
-// saying out loud before someone spends an evening debugging it.
-func warnIfNoInbox(hexKey string) {
-	pub, err := core.PublicKey(hexKey)
-	if err != nil {
-		return
-	}
-	if core.HasInboxRelays(pub) {
-		return
-	}
-	fmt.Fprintln(os.Stderr,
-		"! You have no NIP-17 inbox relay list, so others must guess where to reach you.")
-	fmt.Fprintln(os.Stderr,
-		"  Messages may silently never arrive. Fix with:  earmark channel inbox --publish")
-}
-
 // channelInboxCmd shows, or publishes, the user's NIP-17 DM relay list.
 func channelInboxCmd() *cobra.Command {
 	var publish bool
@@ -100,9 +80,12 @@ func channelInboxCmd() *cobra.Command {
 		Long: `Channel messages are gift wrapped and addressed to you, so they belong on
 relays you actually read — your NIP-17 (kind 10050) DM relay list.
 
-Without one, everyone sending to you is guessing, and messages can silently
-never arrive. This is never published automatically: the list may have been
-curated in your primary Nostr client, and a music tool should not overwrite it.`,
+You should not need this command. A list is published for you the first time you
+create or join a channel, because channels do not work without one.
+
+What is never automatic is *overwriting* a list you already have — kind 10050
+governs your NIP-17 direct messages in every Nostr client, not just this one, so
+replacing it is an explicit choice. That is what --publish is for.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			hexKey, err := requireKey()
@@ -133,7 +116,7 @@ curated in your primary Nostr client, and a music tool should not overwrite it.`
 			}
 
 			relays := core.Relays()
-			step("publishing an inbox relay list with %d relay(s)", len(relays))
+			step("overwriting your inbox relay list with %d configured relay(s)", len(relays))
 			if err := core.PublishInboxRelays(ctx, hexKey, relays); err != nil {
 				return err
 			}
@@ -168,7 +151,6 @@ func channelCreateCmd() *cobra.Command {
 			}
 			step("published")
 			fmt.Printf("Created channel %q (%s)\n", ch.Descriptor.Name, ch.Descriptor.ID[:12])
-			warnIfNoInbox(hexKey)
 			fmt.Printf("Invite someone:  earmark channel invite %q <npub>\n", ch.Descriptor.Name)
 			return nil
 		},
@@ -276,9 +258,12 @@ func channelInviteCmd() *cobra.Command {
 			}
 			fmt.Printf("Invited %s to %q.\n", core.NpubFromPublicKey(memberPub), args[0])
 			if !core.HasInboxRelays(memberPub) {
+				// They publish their own list the first time they use a
+				// channel-aware client, so this resolves itself — but until it
+				// does, delivery is a guess and worth saying.
 				fmt.Fprintf(os.Stderr,
-					"! They have no NIP-17 inbox relay list, so delivery falls back to your relays.\n"+
-						"  If they do not read those, the invite will silently never arrive.\n")
+					"! They have not published inbox relays yet, so delivery falls back to yours.\n"+
+						"  It will sort itself out once they open a channel-aware client.\n")
 			}
 			fmt.Println("They will see nothing posted before now — channels do not backfill.")
 			return nil

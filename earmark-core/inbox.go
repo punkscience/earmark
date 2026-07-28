@@ -80,12 +80,39 @@ func HasInboxRelays(pubHex string) bool {
 	})) > 0
 }
 
+// EnsureInboxRelays publishes an inbox relay list when the user has none, and
+// leaves an existing one strictly alone. Returns true when it published.
+//
+// Channels do not work without a kind-10050: senders fall back to guessing, and
+// undelivered messages produce no error on either end. Requiring the user to
+// know that — and to run a command about a NIP they have never heard of — is
+// not a reasonable price for "share a song with a friend", so the empty case is
+// handled for them.
+//
+// An *existing* list is never touched. kind-10050 governs NIP-17 direct
+// messages across all of that user's Nostr clients, not just this one;
+// overwriting a curated list with a music app's relay set could quietly break
+// their DMs elsewhere. Absent means help, present means hands off.
+func EnsureInboxRelays(ctx context.Context, hexPrivKey string) (bool, error) {
+	pubHex, err := nostr.GetPublicKey(hexPrivKey)
+	if err != nil {
+		return false, fmt.Errorf("could not derive public key: %w", err)
+	}
+	if HasInboxRelays(pubHex) {
+		return false, nil
+	}
+	if err := PublishInboxRelays(ctx, hexPrivKey, Relays()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // PublishInboxRelays publishes the user's NIP-17 DM relay list, telling other
 // clients where to send them gift wraps.
 //
-// This is never done automatically. A kind-10050 may have been curated in the
-// user's primary Nostr client, and a music player has no business overwriting
-// it — the same reasoning that kept `relay add` from touching kind-10002.
+// This overwrites any existing list, so it is only ever called directly by an
+// explicit user action. Automatic use goes through EnsureInboxRelays, which
+// refuses to touch a list that already exists.
 func PublishInboxRelays(ctx context.Context, hexPrivKey string, relays []string) error {
 	if len(relays) == 0 {
 		return fmt.Errorf("refusing to publish an empty inbox relay list")

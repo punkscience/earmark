@@ -39,6 +39,9 @@ func CreateChannel(ctx context.Context, hexPrivKey, name string) (*Channel, erro
 	if err := SaveChannelState(ctx, hexPrivKey, st); err != nil {
 		return nil, err
 	}
+	// Creating a channel means intending to receive on it. Without an inbox
+	// list nobody can reliably reach us, and the failure is silent.
+	_, _ = EnsureInboxRelays(ctx, hexPrivKey)
 	return &ch, nil
 }
 
