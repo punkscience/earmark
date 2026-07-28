@@ -103,9 +103,9 @@ replacing it is an explicit choice. That is what --publish is for.`,
 				step("looking up your inbox relay list")
 				current := core.FetchInboxRelays(ctx, pub)
 				if len(current) == 0 {
-					fmt.Println("No inbox relay list published.")
-					fmt.Println("Others are guessing where to reach you; messages may not arrive.")
-					fmt.Println("Publish one with:  earmark channel inbox --publish")
+					fmt.Println("No inbox relay list published yet.")
+					fmt.Println("One is published for you automatically the first time you create")
+					fmt.Println("or join a channel — you should not need to do anything.")
 					return nil
 				}
 				fmt.Printf("%d inbox relay(s):\n\n", len(current))
