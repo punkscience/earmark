@@ -1,6 +1,5 @@
 package com.derpy.earmarks.nostr
 
-import android.util.Base64
 import org.bouncycastle.asn1.sec.SECNamedCurves
 import org.bouncycastle.crypto.agreement.ECDHBasicAgreement
 import org.bouncycastle.crypto.engines.ChaCha7539Engine
@@ -10,12 +9,13 @@ import org.bouncycastle.crypto.params.ECPublicKeyParameters
 import org.bouncycastle.crypto.params.KeyParameter
 import org.bouncycastle.crypto.params.ParametersWithIV
 import java.math.BigInteger
+import java.util.Base64
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * NIP-44 v2 decryption.
+ * NIP-44 v2 encryption and decryption.
  *
  * Spec: https://github.com/nostr-protocol/nips/blob/master/44.md
  *
@@ -23,7 +23,14 @@ import javax.crypto.spec.SecretKeySpec
  *   conversation_key = HKDF-Extract(salt="nip44-v2", IKM=shared_x)   ← Extract only
  *   message_keys     = HKDF-Expand(PRK=conversation_key, info=nonce, L=76)  ← Expand only
  *
- * For derpy earmarks the sender and recipient are the same key (self-encryption).
+ * The earmark list is self-encrypted (sender == recipient), which is just the
+ * degenerate case of [encryptTo]/[decryptFrom] with your own pubkey as the peer.
+ * Channels use the peer form to seal and wrap messages for other people.
+ *
+ * This file deliberately uses `java.util.Base64` rather than `android.util.Base64`
+ * so the whole object is exercisable from plain JVM unit tests — the NIP-44 spec
+ * vectors in `Nip44Test` are the only thing standing between a subtle mistake here
+ * and silent incompatibility with the Go clients.
  */
 object Nip44 {
     private val CURVE_PARAMS = SECNamedCurves.getByName("secp256k1")
@@ -32,11 +39,24 @@ object Nip44 {
     )
 
     /**
-     * Decrypts a NIP-44 v2 encrypted event content using self-encryption
-     * (sender == recipient, both use [privKeyHex]).
+     * Decrypts NIP-44 v2 content that was self-encrypted (sender == recipient).
      */
-    fun decrypt(privKeyHex: String, encryptedContent: String): String {
-        val payload = Base64.decode(encryptedContent, Base64.DEFAULT)
+    fun decrypt(privKeyHex: String, encryptedContent: String): String =
+        decryptFrom(privKeyHex, derivePubKeyHex(privKeyHex), encryptedContent)
+
+    /**
+     * Decrypts NIP-44 v2 content sent to us by [peerPubHex].
+     */
+    fun decryptFrom(privKeyHex: String, peerPubHex: String, encryptedContent: String): String =
+        decryptWithKey(conversationKey(privKeyHex, peerPubHex), encryptedContent)
+
+    /**
+     * Decrypts NIP-44 v2 content given an already-derived conversation key.
+     * Deriving the key costs an EC multiplication, so callers processing many
+     * messages from one peer should derive once and reuse.
+     */
+    fun decryptWithKey(conversationKey: ByteArray, encryptedContent: String): String {
+        val payload = Base64.getMimeDecoder().decode(encryptedContent)
         require(payload.isNotEmpty() && payload[0] == 0x02.toByte()) {
             "Unsupported NIP-44 version (expected 0x02)"
         }
@@ -46,9 +66,6 @@ object Nip44 {
         val nonce32 = payload.copyOfRange(1, 33)
         val mac = payload.copyOfRange(payload.size - 32, payload.size)
         val ciphertext = payload.copyOfRange(33, payload.size - 32)
-
-        // conversation_key = HKDF-Extract(salt="nip44-v2", IKM=shared_x)
-        val conversationKey = deriveConversationKey(privKeyHex)
 
         // message_keys = HKDF-Expand(PRK=conversation_key, info=nonce, L=76)
         val messageKeys = hkdfExpand(conversationKey, nonce32, 76)
@@ -81,11 +98,21 @@ object Nip44 {
     }
 
     /**
-     * NIP-44 v2 self-encryption. Encrypts [plaintext] using the user's own
-     * private key as both sender and recipient.
+     * NIP-44 v2 self-encryption. Encrypts [plaintext] to the user's own key.
      */
-    fun encrypt(privKeyHex: String, plaintext: String): String {
-        val conversationKey = deriveConversationKey(privKeyHex)
+    fun encrypt(privKeyHex: String, plaintext: String): String =
+        encryptTo(privKeyHex, derivePubKeyHex(privKeyHex), plaintext)
+
+    /**
+     * NIP-44 v2 encryption of [plaintext] to [peerPubHex].
+     */
+    fun encryptTo(privKeyHex: String, peerPubHex: String, plaintext: String): String =
+        encryptWithKey(conversationKey(privKeyHex, peerPubHex), plaintext)
+
+    /**
+     * NIP-44 v2 encryption given an already-derived conversation key.
+     */
+    fun encryptWithKey(conversationKey: ByteArray, plaintext: String): String {
         val nonce32 = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val messageKeys = hkdfExpand(conversationKey, nonce32, 76)
         val chachaKey = messageKeys.copyOfRange(0, 32)
@@ -102,7 +129,7 @@ object Nip44 {
         System.arraycopy(nonce32, 0, payload, 1, 32)
         System.arraycopy(ciphertext, 0, payload, 33, ciphertext.size)
         System.arraycopy(mac, 0, payload, 33 + ciphertext.size, 32)
-        return Base64.encodeToString(payload, Base64.NO_WRAP)
+        return Base64.getEncoder().encodeToString(payload)
     }
 
     /**
@@ -129,13 +156,20 @@ object Nip44 {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private fun deriveConversationKey(privKeyHex: String): ByteArray {
+    /**
+     * conversation_key = HKDF-Extract(salt="nip44-v2", IKM=shared_x)
+     *
+     * Nostr pubkeys are x-only (BIP-340), so the peer's curve point is
+     * reconstructed with an assumed even y (0x02 prefix). That choice is free:
+     * flipping y negates the shared point, and NIP-44 uses only its
+     * x-coordinate, which is unchanged. This is what the Go clients do too.
+     */
+    fun conversationKey(privKeyHex: String, peerPubHex: String): ByteArray {
         val privBigInt = BigInteger(1, privKeyHex.hexToBytes())
-        val pubPoint = CURVE_PARAMS.g.multiply(privBigInt).normalize()
-        val compressedPub = pubPoint.getEncoded(true)  // 33 bytes
+        val peerPoint = CURVE_PARAMS.curve.decodePoint(byteArrayOf(0x02) + peerPubHex.hexToBytes())
 
         val privParam = ECPrivateKeyParameters(privBigInt, DOMAIN)
-        val pubParam = ECPublicKeyParameters(CURVE_PARAMS.curve.decodePoint(compressedPub), DOMAIN)
+        val pubParam = ECPublicKeyParameters(peerPoint, DOMAIN)
 
         val agreement = ECDHBasicAgreement()
         agreement.init(privParam)

@@ -4,6 +4,8 @@ Canonical reference for the earmark wire protocol — the contract between `earm
 
 Written originally as the Android implementation spec, so it is phrased from the consumer's side: everything needed to build an application that reads a user's derpy earmark list from Nostr, downloads their earmarked audio files from Blossom servers, decrypts them, and plays them as a playlist. The CLI implements the mirror image — encrypt, chunk, upload, publish.
 
+The document is in two halves. **Steps 1–6** cover the single-user protocol — one owner, one self-encrypted list. **[Channels](#channels)** covers sharing between members of a room, which is a strict addition: a client that implements only the first half remains correct.
+
 ---
 
 ## What the app needs to do
@@ -345,6 +347,245 @@ Play
 | AES-GCM auth tag failure | Corrupt or tampered chunk — skip earmark |
 | NIP-44 decrypt fails | Wrong key or corrupt event — show error |
 | Relay connection timeout | Use 15s timeout; try all relays in parallel |
+| Gift wrap fails to decrypt | Not an error — someone else's mail or spam. Drop silently |
+| Gift wrap or seal signature invalid | Discard the message; do not surface |
+| `post` from a non-roster sender | Drop silently (spam defence) |
+| `roster` not signed by the creator | Drop silently |
+| `roster` with a stale `seq` | Ignore; a newer roster already applied |
+| Unknown envelope `v` or `type` | Ignore the message — forward compatibility, not a failure |
+| Channel has no posts | Show "Tracks posted from now on will appear here" — there is no backfill by design |
+| Blossom server lacks `PUT /mirror` | Fall back to download-verify-upload for Keep |
+
+---
+
+# Channels
+
+Everything above describes the single-user protocol: one owner, one self-encrypted list, a file key that never leaves it.
+
+A **channel** is a named room with N members. Any member can post an earmark into it; every member can play what was posted. The target case is two to five friends trading music.
+
+## Design properties
+
+These are load-bearing. Breaking one is a protocol change, not an implementation detail.
+
+| Property | Consequence |
+|---|---|
+| **A channel is purely client-side.** No relay, and no observer of any relay, can tell that a channel exists, what it is called, who is in it, or that two pubkeys are in one together. | All channel traffic is NIP-59 gift wrapped. No channel identifier ever appears in an event tag. |
+| **Per-member encryption. There is no shared channel key.** Each post is encrypted separately to each member, and the file key rides inside that per-recipient payload. | Removing a member is a no-op — you stop encrypting to them. No rekey ceremony, no single secret whose leak exposes the channel's history. Cost is one event per member per post. |
+| **No backfill.** A member sees only what was posted after they joined. | A direct consequence of per-member encryption: there is no historical key to hand over. Clients **must** say so in the UI; an empty channel is correct behaviour, not a fault. |
+| **Creator-only rosters.** Only the channel creator can add or remove members. | No member can silently widen the audience for music another member posts next. If a creator goes dark the roster freezes; posting still works, and you fork a new channel to change membership. |
+| **Retention is the sender's obligation, for 30 days.** | A post is live for 30 days from `posted_at`, matching earmark lifetime. The sender pins the underlying chunks so their own purge cannot break a recipient. To hold something longer, the recipient adopts it (see *Keep*). |
+
+## Channel identity and state
+
+A channel is defined by a **descriptor**:
+
+```json
+{
+  "id":         "<64 hex chars — 32 random bytes>",
+  "name":       "Family Jams",
+  "creator":    "<creator pubkey, 64 hex>",
+  "created_at": 1712345678
+}
+```
+
+The `id` is generated from a CSPRNG at creation and is **never derived from the name**. It appears only inside encrypted payloads.
+
+Each client keeps its channel state in a **second self-encrypted addressable event**, identical in construction to the earmark list but with a different `d` tag:
+
+```json
+{
+  "kinds":   [30001],
+  "authors": ["<user-pubkey-hex>"],
+  "#d":      ["earmark-channels"],
+  "limit":   1
+}
+```
+
+Content is NIP-44 self-encrypted exactly as the earmark list is (§ *Decrypt the content — NIP-44*). Plaintext:
+
+```json
+{
+  "v": 1,
+  "channels": [
+    {
+      "descriptor": { "id": "...", "name": "Family Jams", "creator": "...", "created_at": 1712345678 },
+      "members":    ["<pubkey>", "<pubkey>"],
+      "seq":        3,
+      "joined_at":  1712345690
+    }
+  ],
+  "invites": [
+    { "descriptor": {...}, "members": [...], "from": "<pubkey>", "received_at": 1712340000, "trusted": true }
+  ],
+  "pins": [
+    { "chan": "<channel id>", "chunks": ["<sha256>", "..."], "posted_at": 1712345678 }
+  ]
+}
+```
+
+Reusing the list machinery gives cross-device channel sync for free — a new install with the same nsec recovers its channels along with its earmarks.
+
+## Message envelope
+
+Every channel message is a JSON object carried as the content of a NIP-59 rumor:
+
+```json
+{ "v": 1, "chan": "<channel id>", "type": "invite|roster|post|leave", ... }
+```
+
+`v` is the envelope version. Receivers **must** ignore envelopes with an unrecognised `v` or `type` rather than erroring — that is the forward-compatibility hinge.
+
+### `invite`
+
+```json
+{
+  "v": 1, "chan": "<id>", "type": "invite",
+  "name": "Family Jams",
+  "creator": "<pubkey>",
+  "members": ["<pubkey>", "..."],
+  "created_at": 1712345678
+}
+```
+
+Sent by the creator when adding a member. The recipient surfaces it for accept/decline; accepting writes the channel into their state event. Declining records the id so the invite is not re-surfaced.
+
+### `roster`
+
+```json
+{
+  "v": 1, "chan": "<id>", "type": "roster",
+  "name": "Family Jams",
+  "members": ["<pubkey>", "..."],
+  "seq": 4,
+  "updated_at": 1712349999
+}
+```
+
+The full membership list, not a delta. Applied **only** when both hold:
+
+1. the **seal author** is the channel's `creator`, and
+2. `seq` is strictly greater than the highest `seq` already applied for that channel.
+
+Roster messages from anyone else are dropped silently. `seq` starts at 1 and increments on every membership change.
+
+**A roster goes to everyone the change touches, including anyone removed by it.** There is no separate "you have been removed" message: a member who finds themselves absent from a roster their creator signed drops the channel and its pins locally. Omitting the removed member would leave a dead channel on their screen forever — receiving nothing, explaining nothing.
+
+### `post`
+
+```json
+{
+  "v": 1, "chan": "<id>", "type": "post",
+  "posted_at": 1712350000,
+  "earmark": {
+    "artist": "John Coltrane",
+    "album":  "A Love Supreme",
+    "title":  "Resolution",
+    "ts":     1712345678,
+    "blossom": { "key": "...", "ext": ".flac", "chunks": [ ... ] }
+  }
+}
+```
+
+The `earmark` object is exactly the shape defined in § *Parse the earmark list*, **including `blossom.key`** — the AES-256 file key. `path` is omitted; it is meaningless off the originating machine.
+
+Because the whole envelope is encrypted to exactly one recipient, **per-member key wrapping is implicit**. There is no separate key-wrapping construct.
+
+A post is accepted only if the **seal author** is in the receiver's current roster for `chan`. Posts from non-members are dropped silently — this is the primary spam defence.
+
+Post identity is `(seal author, chan, posted_at)`. Clients dedupe on it, since the same post arrives once per relay.
+
+### `leave`
+
+```json
+{ "v": 1, "chan": "<id>", "type": "leave", "left_at": 1712351111 }
+```
+
+Self-removal only. The seal author removes themselves; receivers drop them from their local roster and stop encrypting to them. A `leave` naming anyone other than its own seal author is invalid.
+
+## Transport — NIP-59 gift wrap
+
+Every message above is delivered as one gift wrap **per recipient**. Three layers:
+
+**1. Rumor** — an *unsigned* event. Kind `1737` (an application-internal discriminator; a rumor is never published, so this value is only ever seen after decryption). `content` is the envelope JSON. `sig` **must** be empty.
+
+**2. Seal** — kind `13`. `content` is `NIP-44(rumor JSON, conversationKey(recipient_pub, sender_priv))`. Signed by the sender's **real** key. No tags. `created_at` randomly backdated.
+
+**3. Gift wrap** — kind `1059`. `content` is `NIP-44(seal JSON, conversationKey(recipient_pub, ephemeral_priv))` where `ephemeral_priv` is a **freshly generated key, used once and discarded**. Signed by that ephemeral key. Tags: `[["p", "<recipient pubkey>"]]`. `created_at` randomly backdated.
+
+This is standard NIP-59. Go implementations should use `github.com/nbd-wtf/go-nostr/nip59` (`GiftWrap` / `GiftUnwrap`) rather than hand-rolling.
+
+### Backdating
+
+Both the seal and the gift wrap carry a randomised `created_at` in the past, so relay timestamps cannot be correlated into a conversation. `go-nostr` backdates by up to 6 hours; the NIP allows up to 2 days.
+
+**Receivers must therefore never order or expire channel content by `created_at`.** Use `posted_at` from inside the rumor. Query windows must allow for the maximum backdating: to see 30 days of posts, query `since: now - 32 days`.
+
+### Receiving
+
+```json
+{ "kinds": [1059], "#p": ["<my pubkey>"], "since": <now - 32 days> }
+```
+
+For each gift wrap:
+
+1. Verify the gift wrap's own signature. Discard if invalid.
+2. NIP-44 decrypt `content` with `conversationKey(gw.pubkey, my_priv)` → seal JSON.
+3. Verify the **seal's** signature. Discard if invalid.
+4. NIP-44 decrypt the seal's `content` with `conversationKey(seal.pubkey, my_priv)` → rumor JSON.
+5. **The sender is `seal.pubkey`.** The rumor's own `pubkey` field is attacker-controlled and carries no authority — overwrite it with `seal.pubkey` (this is what `nip59.GiftUnwrap` does) or reject the message if the two differ. Never trust it as-is.
+6. Parse the envelope and apply the `type` rules above.
+
+Gift wraps that fail to decrypt are not errors — they are other people's mail, or spam. Drop them without surfacing anything.
+
+## Sending
+
+To post an earmark to a channel:
+
+1. Load the current roster from channel state.
+2. Build the `post` envelope once.
+3. For each member **other than yourself**, generate a fresh ephemeral key and emit one gift wrap.
+4. Publish all wraps to the configured relays.
+5. Record a pin (below).
+
+Fan-out is `members - 1` events per post. At the design scale (≤ 10 members) this is trivial; implementations should still stagger publishes to avoid tripping relay rate limits.
+
+## Retention
+
+### Pinning
+
+A channel post hands out chunk hashes the sender is hosting. If the sender later purges that earmark from their personal list, the recipients' copies break.
+
+So: on posting, the sender appends `{chan, chunks: [sha256...], posted_at}` to `pins` in the channel state event. Blossom chunk deletion **must** skip any hash referenced by a pin whose `posted_at` is within the last 30 days. Expired pins are dropped during the same purge pass.
+
+### Keep
+
+A channel post is only guaranteed for 30 days. A recipient who wants to hold on to a track **adopts** it: the chunks are copied to the recipient's own Blossom servers and the earmark is written into their personal list with a fresh `ts`, starting a new 30-day clock under their own ownership.
+
+The copy uses **Blossom BUD-04 mirroring**, not a re-upload:
+
+```
+PUT https://<my-blossom-server>/mirror
+Authorization: Nostr <base64 kind-24242 event>
+Content-Type: application/json
+
+{ "url": "https://<source-server>/<sha256>" }
+```
+
+The kind-24242 auth event is built exactly as for upload (§ *Blossom auth*), with the `x` tag set to the chunk hash. The server fetches the bytes itself — **no bytes move through the client**, which is what makes Keep viable on a phone.
+
+Where a server does not implement `/mirror`, fall back to download-verify-upload.
+
+Adoption reuses the **same AES key and the same chunk hashes**. It is a change of hosting, not of encryption; nothing is re-encrypted. The original sender can still decrypt the adopted copy, which is inherent to having been given the file.
+
+## Anti-spam and web of trust
+
+Two filters, both client-side:
+
+- **Posts** from a seal author not in the receiver's current roster for that channel: dropped silently.
+- **Invites** from a pubkey absent from the receiver's NIP-02 follow list (kind `3`): accepted into the state event's `invites` array with `"trusted": false`, but not surfaced as a notification. Clients show these in a separate requests bucket.
+
+Web of trust does **not** grant access and is not a discovery mechanism. Membership is decided by the creator and enforced by who the senders encrypt to. Following someone only affects how loudly their invite arrives.
 
 ---
 
@@ -354,6 +595,15 @@ Play
 |----------|-------|
 | Earmark list event kind | `30001` |
 | Earmark list `d` tag | `"derpy-earmarks"` |
+| Channel state `d` tag | `"earmark-channels"` (kind `30001`, self-encrypted) |
+| Channel rumor kind | `1737` (internal; never published unencrypted) |
+| Seal kind | `13` (NIP-59) |
+| Gift wrap kind | `1059` (NIP-59) |
+| Channel id | 32 random bytes, hex |
+| Channel envelope version | `1` |
+| Gift wrap query window | `now - 32 days` (30-day content + 2-day max backdating) |
+| Channel post lifetime | 30 days from `posted_at` |
+| Blossom mirror endpoint | `PUT /mirror` (BUD-04), kind-24242 auth |
 | Chunk size (plaintext) | `16 * 1024 * 1024` bytes (16 MiB) |
 | Encrypted chunk overhead | 12 bytes (nonce) + 16 bytes (GCM tag) = 28 bytes |
 | AES key size | 32 bytes (AES-256) |

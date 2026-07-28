@@ -6,18 +6,21 @@ Universal context for any AI coding agent working in this repository.
 
 **Earmark** is a private, encrypted music-stash system built on Nostr identity and Blossom storage. An *earmark* is an audio file the user flagged: encrypted client-side, chunked, uploaded to Blossom servers, and recorded in a private Nostr list (kind 30001, NIP-44 self-encrypted). Earmarks expire after 30 days.
 
-This is a monorepo holding both clients of that protocol.
+A **channel** is a named room of Nostr identities who share earmarks with each other. Channel traffic is NIP-59 gift wrapped, so no relay can tell a channel exists. See the Channels section of `docs/PROTOCOL.md`.
+
+This is a monorepo holding the protocol core and both clients.
 
 | Directory | Project | Stack | Role |
 |-----------|---------|-------|------|
-| `earmark-cli/` | earmark | Go | Desktop CLI — finds music on disk or in PLS/M3U playlists, encrypts, uploads, manages the earmark list |
-| `earmarks-mobile/` | earmarks-mobile | Kotlin + Jetpack Compose | Android app — reads the earmark list, downloads and decrypts from Blossom, plays shuffled with background audio and Android Auto |
+| `earmark-core/` | earmark-core | Go | Shared protocol implementation — crypto, chunking, Blossom, the Nostr list, channels. No `main`, no UI, no config I/O. Also consumed by [derpy](https://github.com/punkscience/derpy). |
+| `earmark-cli/` | earmark | Go | Desktop CLI — finds music on disk or in PLS/M3U playlists, encrypts, uploads, manages the earmark list and channels |
+| `earmarks-mobile/` | earmarks-mobile | Kotlin + Jetpack Compose | Android app — reads the earmark list and channel feeds, downloads and decrypts from Blossom, plays shuffled with background audio and Android Auto |
 
-The two share no build system and no code — only the wire protocol. **Any change to the protocol must be made in both.**
+The Go clients share `earmark-core`. Android shares nothing but the wire protocol — its Nostr, NIP-44 and (for channels) NIP-59 implementations are hand-written ports. **Any change to the protocol must be made on both sides.**
 
 ## Shared docs
 
-- **`docs/PROTOCOL.md`** — the full earmark protocol spec: crypto constants, event shapes, chunk format, Blossom manifest layout. This is the contract between the two clients. Originally written as the Android implementation spec; it is now the canonical protocol reference for both.
+- **`docs/PROTOCOL.md`** — the full earmark protocol spec: crypto constants, event shapes, chunk format, Blossom manifest layout, and the Channels section (gift wrap, rosters, retention). This is the contract between the clients. Originally written as the Android implementation spec; it is now the canonical protocol reference for all of them.
 - **`docs/agents/`** — repo-wide agent conventions (issue tracker, triage labels, domain docs).
 
 Each subproject has its own `AGENTS.md` with build commands, architecture, and local conventions. Read the one for the directory you are working in.
@@ -38,10 +41,20 @@ Changing any of these breaks the other client. Verify both sides before touching
 | Default relays | `wss://relay.towerofsong.ca`, `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://nostr.wine` |
 | Default Blossom servers | `blossom.towerofsong.ca` (primary), `blossom.band`, `cdn.satellite.earth` |
 | Earmark lifetime | 30 days, auto-purged |
+| Channel state event | `30001`, `d` tag = `"earmark-channels"`, self-encrypted like the earmark list |
+| Channel transport | NIP-59 gift wrap — rumor kind `1737`, seal `13`, gift wrap `1059`. One wrap per member per message |
+| Channel sender identity | The **seal's** pubkey. The rumor's `pubkey` field carries no authority |
+| Channel key model | Per-member encryption, file key inside the rumor. No shared channel key, no backfill |
+| Roster authority | Channel creator only, ordered by monotonic `seq` |
+| Channel post lifetime | 30 days from `posted_at`; sender pins the chunks against their own purge |
+| Gift wrap query window | `now - 32 days` — 30 days of content plus 2 days of maximum backdating |
 
 ## Build
 
 ```bash
+# Shared Go core — most protocol tests live here
+cd earmark-core && go build ./... && go vet ./... && go test ./...
+
 # CLI
 cd earmark-cli && go build ./... && go test ./...
 
@@ -49,9 +62,11 @@ cd earmark-cli && go build ./... && go test ./...
 cd earmarks-mobile && ./gradlew assembleDebug
 ```
 
+The repo-root `go.work` ties `earmark-core` and `earmark-cli` together, so an edit to the core is picked up by the CLI with no publish step. `earmark-cli/go.mod` also carries a `replace` directive to `../earmark-core`, which keeps the CLI buildable outside the workspace (release tooling, CI checkouts).
+
 ## CI
 
-`.github/workflows/mobile-build.yml` builds and tests the Android app on PRs that touch `earmarks-mobile/`, and publishes a sideloadable APK release on manual dispatch. Mobile release tags are prefixed `mobile-`. The CLI has no CI yet.
+`.github/workflows/mobile-build.yml` builds and tests the Android app on PRs that touch `earmarks-mobile/`, and publishes a sideloadable APK release on manual dispatch. Mobile release tags are prefixed `mobile-`. The Go side has no CI yet.
 
 ## Agent skills
 

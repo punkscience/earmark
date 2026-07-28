@@ -1,4 +1,4 @@
-package main
+package earmark
 
 import (
 	"bytes"
@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,26 +27,8 @@ const (
 	blossomAuthKind  = 24242
 )
 
-// defaultBlossomServers is the fallback list used when the user has not
-// configured any servers. blossom.towerofsong.ca is the primary (self-hosted)
-// server; the others are public fallbacks that accept encrypted blob uploads
-// from any authenticated pubkey. Media-only hosts (e.g. nostr.build) are
-// excluded because they reject encrypted octet-stream blobs with 415.
-var defaultBlossomServers = []string{
-	"https://blossom.towerofsong.ca",
-	"https://blossom.band",
-	"https://cdn.satellite.earth",
-}
-
-// LoadBlossomServers returns the user-configured Blossom server list.
-func LoadBlossomServers() []string {
-	cfg, err := LoadConfig()
-	if err == nil && len(cfg.BlossomServers) > 0 {
-		return cfg.BlossomServers
-	}
-	return defaultBlossomServers
-}
-
+// BlossomChunk is one encrypted 16 MiB slice of a file, addressed by the
+// SHA-256 of its *encrypted* bytes.
 type BlossomChunk struct {
 	Index   int      `json:"index"`
 	SHA256  string   `json:"sha256"`
@@ -374,25 +355,6 @@ func PrepareUpload(filePath string) ([]PreparedChunk, *BlossomManifest, error) {
 // UploadProgress reports cumulative encrypted bytes uploaded for the file.
 type UploadProgress func(bytesUploaded, bytesTotal int64)
 
-// defaultUploadIdleTimeout is how long an upload may make no progress before it
-// is abandoned when no override is configured.
-const defaultUploadIdleTimeout = 60 * time.Second
-
-// uploadIdleTimeout resolves the upload idle timeout: the
-// EARMARK_UPLOAD_IDLE_TIMEOUT env var (seconds) wins, then the config value,
-// then the built-in default.
-func uploadIdleTimeout() time.Duration {
-	if v := os.Getenv("EARMARK_UPLOAD_IDLE_TIMEOUT"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
-		}
-	}
-	if cfg, err := LoadConfig(); err == nil && cfg.UploadIdleTimeoutSeconds > 0 {
-		return time.Duration(cfg.UploadIdleTimeoutSeconds) * time.Second
-	}
-	return defaultUploadIdleTimeout
-}
-
 // UploadPrepared uploads pre-encrypted chunks to all servers concurrently.
 // Each server request has an idle watchdog: it is cancelled only after the
 // upload makes no progress for the resolved idle timeout, so slow-but-steady
@@ -513,11 +475,25 @@ func DownloadAndReassemble(ctx context.Context, manifest *BlossomManifest, hexPr
 
 // DeleteManifestChunks deletes all chunks in the manifest from all servers.
 func DeleteManifestChunks(ctx context.Context, hexPrivKey string, manifest *BlossomManifest) {
+	DeleteManifestChunksExcept(ctx, hexPrivKey, manifest, nil)
+}
+
+// DeleteManifestChunksExcept deletes a manifest's chunks, skipping any hash in
+// pinned.
+//
+// Pins exist because a channel post hands recipients the hashes of chunks this
+// user is hosting. Purging your own earmark inside the post's 30-day window
+// would delete the audio out from under them, so the purge has to know what it
+// has lent out. See ChannelState.PinnedChunks.
+func DeleteManifestChunksExcept(ctx context.Context, hexPrivKey string, manifest *BlossomManifest, pinned map[string]struct{}) {
 	if manifest == nil {
 		return
 	}
 	var wg sync.WaitGroup
 	for _, chunk := range manifest.Chunks {
+		if _, held := pinned[chunk.SHA256]; held {
+			continue
+		}
 		for _, server := range chunk.Servers {
 			chunk, server := chunk, server
 			wg.Add(1)
@@ -539,7 +515,7 @@ func ResolveBlossomServers(hexPrivKey string) ([]string, error) {
 	discoverCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	nip10063 := fetchBlossomServers(discoverCtx, pubHex)
 	cancel()
-	return unionStrings(nip10063, LoadBlossomServers()), nil
+	return unionStrings(nip10063, BlossomServers()), nil
 }
 
 func fetchBlossomServers(ctx context.Context, pubHex string) []string {
@@ -548,7 +524,7 @@ func fetchBlossomServers(ctx context.Context, pubHex string) []string {
 		Authors: []string{pubHex},
 		Limit:   1,
 	}
-	ev := queryRelays(ctx, LoadNostrRelays(), filter)
+	ev := QueryRelays(ctx, Relays(), filter)
 	if ev == nil {
 		return nil
 	}

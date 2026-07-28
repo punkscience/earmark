@@ -4,7 +4,25 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
+
+	core "github.com/punkscience/earmark/earmark-core"
 )
+
+// configureCore pushes the persisted config into earmark-core. The core does no
+// config-file I/O of its own, so this must run before any core call that talks
+// to a relay or a Blossom server, and again after any config change.
+func configureCore() {
+	cfg, err := LoadConfig()
+	if err != nil {
+		cfg = &Config{}
+	}
+	core.Configure(core.Settings{
+		Relays:            cfg.NostrRelays,
+		BlossomServers:    cfg.BlossomServers,
+		UploadIdleTimeout: time.Duration(cfg.UploadIdleTimeoutSeconds) * time.Second,
+	})
+}
 
 // configDir returns the path to earmark's config directory (~/.config/earmark).
 func configDir() (string, error) {
@@ -77,5 +95,9 @@ func SaveConfig(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	configureCore()
+	return nil
 }

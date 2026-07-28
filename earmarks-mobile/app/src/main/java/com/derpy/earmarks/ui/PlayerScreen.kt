@@ -46,15 +46,41 @@ fun PlayerScreen(
     playerState: PlayerState,
     stats: BlossomStats,
     notice: String?,
+    channelState: ChannelUiState,
     onDismissNotice: () -> Unit,
     onPlayPause: () -> Unit,
     onSkipNext: () -> Unit,
     onSkipPrevious: () -> Unit,
     onDeleteCurrent: () -> Unit,
-    onClearKey: () -> Unit
+    onClearKey: () -> Unit,
+    onSelectSource: (PlayerSource) -> Unit,
+    onAcceptInvite: (String) -> Unit,
+    onDeclineInvite: (String) -> Unit,
+    onKeepCurrent: () -> Unit,
+    onShareCurrent: (String) -> Unit
 ) {
     var showSettings by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showInvites by remember { mutableStateOf(false) }
+    var showShare by remember { mutableStateOf(false) }
+
+    if (showInvites) {
+        InvitesDialog(
+            invites = channelState.invites,
+            onAccept = { onAcceptInvite(it); showInvites = false },
+            onDecline = { onDeclineInvite(it); showInvites = false },
+            onDismiss = { showInvites = false }
+        )
+    }
+
+    if (showShare) {
+        ShareToChannelDialog(
+            channels = channelState.channels,
+            trackTitle = playerState.title.ifBlank { "this track" },
+            onShare = { onShareCurrent(it); showShare = false },
+            onDismiss = { showShare = false }
+        )
+    }
 
     if (notice != null) {
         AlertDialog(
@@ -115,6 +141,28 @@ fun PlayerScreen(
             Wordmark(fontSizeSp = 20)
             IconButton(onClick = { showSettings = true }) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings")
+            }
+        }
+
+        ChannelSourceBar(
+            channelState = channelState,
+            onSelectSource = onSelectSource,
+            onShowInvites = { showInvites = true },
+            modifier = Modifier.padding(top = 12.dp)
+        )
+
+        // Keep is only meaningful on someone else's track; on your own the copy
+        // is already yours. Share works from either source.
+        val listeningToChannel = channelState.source is PlayerSource.Channel
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (listeningToChannel) {
+                TextButton(onClick = onKeepCurrent) { Text("Keep") }
+            }
+            if (channelState.channels.isNotEmpty()) {
+                TextButton(onClick = { showShare = true }) { Text("Share to channel") }
             }
         }
 

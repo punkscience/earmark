@@ -87,6 +87,15 @@ dependencies {
     // Crypto: secp256k1 ECDH, HKDF-SHA256, ChaCha20 for NIP-44
     implementation(libs.bouncycastle)
 
+    // JVM unit tests. The NIP-44 and gift wrap code deliberately avoids
+    // android.* APIs so its cross-client conformance vectors run here rather
+    // than needing a device.
+    testImplementation(libs.junit4)
+    // Android stubs out org.json in JVM unit tests; the real implementation lets
+    // the gift wrap tests run without a device.
+    testImplementation(libs.org.json)
+    testImplementation(libs.kotlinx.coroutines.test)
+
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.okhttp.mockwebserver)

@@ -10,12 +10,15 @@ import (
 
 	"ca.punkscience.earmark/internal/filter"
 	"github.com/spf13/cobra"
+
+	core "github.com/punkscience/earmark/earmark-core"
 )
 
 // Version is the build version, injected at build time via ldflags.
 var Version = "dev"
 
 func main() {
+	configureCore()
 	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "earmark: %v\n", err)
 		os.Exit(1)
@@ -24,6 +27,7 @@ func main() {
 
 func rootCmd() *cobra.Command {
 	var sourceDir string
+	var channels []string
 
 	cmd := &cobra.Command{
 		Use:   "earmark [--source <dir>] [keyword...]",
@@ -46,7 +50,8 @@ Examples:
   earmark --source ~/Music jazz               Search for "jazz", select, upload
   earmark --source ~/Music "miles AND davis"   Search with expression
   earmark playlist.m3u                         Upload all tracks in playlist
-  earmark song.flac                            Upload a single file`,
+  earmark song.flac                            Upload a single file
+  earmark --channel "Family Jams" song.flac    Upload and share to a channel`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hexKey := resolveNostrKey()
@@ -83,16 +88,19 @@ Examples:
 				paths = selected
 			}
 
-			return UploadFiles(hexKey, paths)
+			return UploadFiles(hexKey, paths, channels)
 		},
 	}
 
 	cmd.Flags().StringVar(&sourceDir, "source", "", "Directory to search for audio files")
+	cmd.Flags().StringArrayVar(&channels, "channel", nil,
+		"Also post each earmark to this channel (repeatable)")
 
 	cmd.AddCommand(versionCmd())
 	cmd.AddCommand(keyCmd())
 	cmd.AddCommand(listCmd())
 	cmd.AddCommand(downloadCmd())
+	cmd.AddCommand(channelCmd())
 
 	return cmd
 }
@@ -100,7 +108,7 @@ Examples:
 // runLegacyMigration merges any earmark list published under the legacy d tag
 // into the current list. Failures are non-fatal; the command proceeds.
 func runLegacyMigration(hexKey string) {
-	n, err := MigrateLegacyEarmarks(hexKey)
+	n, err := core.MigrateLegacyEarmarks(hexKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: legacy list migration: %v\n", err)
 		return
@@ -233,7 +241,7 @@ Pass an empty string to clear the saved key:
 				fmt.Println("Nostr private key cleared.")
 				return nil
 			}
-			hexKey, err := resolvePrivateKey(rawInput)
+			hexKey, err := core.ResolvePrivateKey(rawInput)
 			if err != nil {
 				return fmt.Errorf("invalid key: %w", err)
 			}
@@ -270,7 +278,7 @@ func listCmd() *cobra.Command {
 				return fmt.Errorf("no Nostr private key configured — run: earmark key <nsec_or_hex_key>")
 			}
 			runLegacyMigration(hexKey)
-			earmarks, err := FetchEarmarks(hexKey)
+			earmarks, err := core.FetchEarmarks(hexKey)
 			if err != nil {
 				return fmt.Errorf("could not fetch earmarks: %w", err)
 			}
@@ -315,7 +323,7 @@ Tracks that exist locally are skipped.`,
 			}
 			runLegacyMigration(hexKey)
 			fmt.Println("Fetching earmarks...")
-			earmarks, err := FetchEarmarks(hexKey)
+			earmarks, err := core.FetchEarmarks(hexKey)
 			if err != nil {
 				return fmt.Errorf("could not fetch earmarks: %w", err)
 			}
@@ -340,7 +348,7 @@ Tracks that exist locally are skipped.`,
 
 				fmt.Printf("[%d/%d] %s: downloading...\n", i+1, len(earmarks), desc)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				tmp, err := DownloadAndReassemble(ctx, e.Blossom, hexKey, func(done, total int) {
+				tmp, err := core.DownloadAndReassemble(ctx, e.Blossom, hexKey, func(done, total int) {
 					fmt.Printf("  chunk %d/%d\n", done, total)
 				})
 				cancel()
