@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	core "github.com/punkscience/earmark/earmark-core"
 )
 
 // queueFilePath returns the path to the offline earmark queue file.
@@ -17,26 +19,26 @@ func queueFilePath() (string, error) {
 }
 
 // LoadQueue reads the offline earmark queue from disk.
-func LoadQueue() ([]Earmark, error) {
+func LoadQueue() ([]core.Earmark, error) {
 	path, err := queueFilePath()
 	if err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return []Earmark{}, nil
+		return []core.Earmark{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("could not read queue file: %w", err)
 	}
-	var earmarks []Earmark
+	var earmarks []core.Earmark
 	if err := json.Unmarshal(data, &earmarks); err != nil {
 		return nil, fmt.Errorf("could not parse queue file: %w", err)
 	}
 	return earmarks, nil
 }
 
-func saveQueue(earmarks []Earmark) error {
+func saveQueue(earmarks []core.Earmark) error {
 	path, err := queueFilePath()
 	if err != nil {
 		return err
@@ -80,7 +82,7 @@ func FlushQueue(hexPrivKey string) (int, error) {
 	}
 	flushed := 0
 	for _, e := range queue {
-		if err := AddEarmark(hexPrivKey, e); err == nil {
+		if err := core.AddEarmark(hexPrivKey, e); err == nil {
 			// Best-effort remove.
 			existing, _ := LoadQueue()
 			filtered := existing[:0]

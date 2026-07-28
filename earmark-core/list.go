@@ -1,4 +1,4 @@
-package main
+package earmark
 
 import (
 	"context"
@@ -71,7 +71,7 @@ func fetchEarmarkEvent(ctx context.Context, pubHex, dTag string) *nostr.Event {
 		Tags:    nostr.TagMap{"d": []string{dTag}},
 		Limit:   1,
 	}
-	return queryRelays(ctx, LoadNostrRelays(), filter)
+	return QueryRelays(ctx, Relays(), filter)
 }
 
 func decryptEarmarks(ev *nostr.Event, convKey [32]byte) ([]Earmark, error) {
@@ -148,10 +148,17 @@ func MigrateLegacyEarmarks(hexPrivKey string) (int, error) {
 	}
 	delCtx, delCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer delCancel()
-	if err := publishToRelays(delCtx, LoadNostrRelays(), del); err != nil {
+	if err := PublishToRelays(delCtx, Relays(), del); err != nil {
 		return added, fmt.Errorf("could not publish deletion of legacy list: %w", err)
 	}
 	return added, nil
+}
+
+// IsDuplicateEarmark reports whether e is already present, matching on path
+// when there is one and on artist/album/title otherwise. Exported because the
+// offline queues in both hosts need the same rule.
+func IsDuplicateEarmark(existing []Earmark, e Earmark) bool {
+	return isDuplicateEarmark(existing, e)
 }
 
 func isDuplicateEarmark(existing []Earmark, e Earmark) bool {
@@ -223,6 +230,17 @@ func CleanupOldEarmarks(hexPrivKey string) (int, error) {
 	if len(remove) == 0 {
 		return 0, nil
 	}
+	// Chunks lent out to a channel within the last 30 days survive the purge —
+	// deleting them would break the recipients' copies. A failure to read
+	// channel state must not silently disable that protection, so it aborts.
+	stateCtx, stateCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	st, err := LoadChannelState(stateCtx, hexPrivKey)
+	stateCancel()
+	if err != nil {
+		return 0, fmt.Errorf("could not read channel state before purge: %w", err)
+	}
+	pinned := st.PinnedChunks(time.Now())
+
 	blossomCtx, blossomCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	var wg sync.WaitGroup
 	for _, e := range remove {
@@ -231,7 +249,7 @@ func CleanupOldEarmarks(hexPrivKey string) (int, error) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				DeleteManifestChunks(blossomCtx, hexPrivKey, e.Blossom)
+				DeleteManifestChunksExcept(blossomCtx, hexPrivKey, e.Blossom, pinned)
 			}()
 		}
 	}
@@ -273,5 +291,54 @@ func publishEarmarks(ctx context.Context, hexPrivKey string, earmarks []Earmark)
 	if err := ev.Sign(hexPrivKey); err != nil {
 		return fmt.Errorf("could not sign earmark event: %w", err)
 	}
-	return publishToRelays(ctx, LoadNostrRelays(), ev)
+	return PublishToRelays(ctx, Relays(), ev)
+}
+
+// NukeEarmarks deletes every Blossom chunk for every earmark and then
+// publishes an empty list, wiping the slate clean. Blossom deletions are
+// best-effort, as in CleanupOldEarmarks.
+//
+// Chunks lent to a channel within the last 30 days are spared — a recipient's
+// copy should not die because the sender cleared their own stash. The channel
+// posts themselves still expire on their own schedule.
+//
+// Returns the number of earmarks removed.
+func NukeEarmarks(hexPrivKey string) (int, error) {
+	earmarks, err := FetchEarmarks(hexPrivKey)
+	if err != nil {
+		return 0, fmt.Errorf("could not fetch earmarks: %w", err)
+	}
+	if len(earmarks) == 0 {
+		return 0, nil
+	}
+
+	stateCtx, stateCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	st, err := LoadChannelState(stateCtx, hexPrivKey)
+	stateCancel()
+	if err != nil {
+		return 0, fmt.Errorf("could not read channel state before wiping: %w", err)
+	}
+	pinned := st.PinnedChunks(time.Now())
+
+	blossomCtx, blossomCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	var wg sync.WaitGroup
+	for _, e := range earmarks {
+		if e.Blossom != nil {
+			e := e
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				DeleteManifestChunksExcept(blossomCtx, hexPrivKey, e.Blossom, pinned)
+			}()
+		}
+	}
+	wg.Wait()
+	blossomCancel()
+
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer publishCancel()
+	if err := publishEarmarks(publishCtx, hexPrivKey, []Earmark{}); err != nil {
+		return 0, fmt.Errorf("could not clear earmark list: %w", err)
+	}
+	return len(earmarks), nil
 }

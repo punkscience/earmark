@@ -147,6 +147,9 @@ func renderItem(it uploadItem) string {
 		case phaseSaving:
 			frac = 1
 			status = dimStyle.Render("saving…")
+		case phasePosting:
+			frac = 1
+			status = dimStyle.Render("posting…")
 		default: // phaseUploading
 			status = fmt.Sprintf("%3.0f%%  %s/%s", frac*100,
 				humanBytes(it.bytesDone), humanBytes(it.bytesTotal))
@@ -195,7 +198,7 @@ func humanBytes(n int64) string {
 }
 
 // uploadFilesTUI uploads files while rendering a live progress view.
-func uploadFilesTUI(hexPrivKey string, paths []string) error {
+func uploadFilesTUI(hexPrivKey string, paths []string, channels []string) error {
 	items := make([]uploadItem, len(paths))
 	for i, p := range paths {
 		items[i] = uploadItem{name: filepath.Base(p)}
@@ -205,7 +208,7 @@ func uploadFilesTUI(hexPrivKey string, paths []string) error {
 	go func() {
 		for i, path := range paths {
 			p.Send(startFileMsg{index: i})
-			err := uploadFile(hexPrivKey, path, func(ev uploadEvent) {
+			err := uploadFile(hexPrivKey, path, channels, func(ev uploadEvent) {
 				p.Send(progressMsg{index: i, ev: ev})
 			})
 			p.Send(fileDoneMsg{index: i, err: err})

@@ -49,6 +49,43 @@ object Schnorr {
     }
 
     /**
+     * Verifies a 64-byte BIP-340 signature over the 32-byte message hash [msg]
+     * against the 32-byte x-only public key [pubKeyBytes].
+     *
+     * Channels depend on this. A gift wrap's seal is the only thing that says
+     * who a message is from, and a roster is only honoured when its seal is
+     * signed by the channel's creator — an unverified signature would let
+     * anyone claim to be anyone.
+     *
+     * Returns false rather than throwing for any malformed input.
+     */
+    fun verify(pubKeyBytes: ByteArray, msg: ByteArray, sig: ByteArray): Boolean {
+        if (pubKeyBytes.size != 32 || msg.size != 32 || sig.size != 64) return false
+        return try {
+            val p = CURVE.curve.field.characteristic
+            val r = BigInteger(1, sig.copyOfRange(0, 32))
+            val s = BigInteger(1, sig.copyOfRange(32, 64))
+            if (r >= p || s >= N) return false
+
+            // lift_x: the even-y point with this x coordinate. decodePoint with a
+            // 0x02 prefix is exactly that, and throws when x is not on the curve.
+            val pubPoint = CURVE.curve.decodePoint(byteArrayOf(0x02) + pubKeyBytes).normalize()
+
+            val e = BigInteger(
+                1, taggedHash("BIP0340/challenge", sig.copyOfRange(0, 32) + pubKeyBytes + msg)
+            ).mod(N)
+
+            // R = s*G - e*P
+            val rPoint = CURVE.g.multiply(s).add(pubPoint.multiply(N.subtract(e))).normalize()
+            if (rPoint.isInfinity) return false
+            if (!hasEvenY(rPoint)) return false
+            rPoint.xCoord.toBigInteger() == r
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * Returns the x-only public key (32 bytes) for [skBytes].
      */
     fun xOnlyPubKey(skBytes: ByteArray): ByteArray {

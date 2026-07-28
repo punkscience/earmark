@@ -1,4 +1,4 @@
-package main
+package earmark
 
 import (
 	"context"
@@ -6,26 +6,11 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
-var defaultNostrRelays = []string{
-	"wss://relay.towerofsong.ca",
-	"wss://relay.damus.io",
-	"wss://relay.primal.net",
-	"wss://nostr.wine",
-}
-
-// LoadNostrRelays returns the user-configured relay list, falling back to defaults.
-func LoadNostrRelays() []string {
-	cfg, err := LoadConfig()
-	if err == nil && len(cfg.NostrRelays) > 0 {
-		return cfg.NostrRelays
-	}
-	return defaultNostrRelays
-}
-
-func publishToRelays(ctx context.Context, relays []string, ev nostr.Event) error {
+// PublishToRelays publishes ev to every relay concurrently. It succeeds if at
+// least one relay accepts the event.
+func PublishToRelays(ctx context.Context, relays []string, ev nostr.Event) error {
 	type result struct{ err error }
 	ch := make(chan result, len(relays))
 	for _, u := range relays {
@@ -59,7 +44,9 @@ func publishToRelays(ctx context.Context, relays []string, ev nostr.Event) error
 	return nil
 }
 
-func queryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nostr.Event {
+// QueryRelays queries every relay concurrently and returns the single newest
+// matching event, or nil when none matched.
+func QueryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nostr.Event {
 	ch := make(chan *nostr.Event, len(relays))
 	for _, u := range relays {
 		u := u
@@ -88,17 +75,49 @@ func queryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nos
 	return latest
 }
 
-// npubFromPrivateKey derives a bech32-encoded npub from a raw hex private key.
-func npubFromPrivateKey(hexPrivKey string) (string, error) {
-	pubHex, err := nostr.GetPublicKey(hexPrivKey)
-	if err != nil {
-		return "", fmt.Errorf("could not derive public key: %w", err)
+// QueryRelaysAll queries every relay concurrently and returns the union of all
+// matching events, deduplicated by event ID. Unlike QueryRelays it does not
+// collapse to a single newest event, so it suits non-addressable kinds where
+// every event matters — gift wraps in particular.
+func QueryRelaysAll(ctx context.Context, relays []string, filter nostr.Filter) []*nostr.Event {
+	ch := make(chan []*nostr.Event, len(relays))
+	for _, u := range relays {
+		u := u
+		go func() {
+			relay, err := nostr.RelayConnect(ctx, u)
+			if err != nil {
+				ch <- nil
+				return
+			}
+			evs, err := relay.QuerySync(ctx, filter)
+			relay.Close()
+			if err != nil {
+				ch <- nil
+				return
+			}
+			ch <- evs
+		}()
 	}
-	npub, err := nip19.EncodePublicKey(pubHex)
-	if err != nil {
-		return pubHex, nil
+	seen := make(map[string]struct{})
+	var out []*nostr.Event
+	for range relays {
+		for _, ev := range <-ch {
+			if ev == nil {
+				continue
+			}
+			if _, dup := seen[ev.ID]; dup {
+				continue
+			}
+			seen[ev.ID] = struct{}{}
+			out = append(out, ev)
+		}
 	}
-	return npub, nil
+	return out
+}
+
+// UnionStrings merges two lists, preserving order and dropping duplicates.
+func UnionStrings(a, b []string) []string {
+	return unionStrings(a, b)
 }
 
 func unionStrings(a, b []string) []string {
@@ -113,14 +132,14 @@ func unionStrings(a, b []string) []string {
 	return out
 }
 
-// fetchUserWriteRelays fetches the user's NIP-65 relay list (kind 10002).
-func fetchUserWriteRelays(ctx context.Context, pubHex string) []string {
+// FetchUserWriteRelays fetches the user's NIP-65 relay list (kind 10002).
+func FetchUserWriteRelays(ctx context.Context, pubHex string) []string {
 	filter := nostr.Filter{
 		Kinds:   []int{10002},
 		Authors: []string{pubHex},
 		Limit:   1,
 	}
-	ev := queryRelays(ctx, LoadNostrRelays(), filter)
+	ev := QueryRelays(ctx, Relays(), filter)
 	if ev == nil {
 		return nil
 	}
@@ -134,6 +153,28 @@ func fetchUserWriteRelays(ctx context.Context, pubHex string) []string {
 		}
 	}
 	return relays
+}
+
+// FetchFollows fetches the user's NIP-02 contact list (kind 3) and returns the
+// followed pubkeys. Used only to decide how loudly a channel invite arrives —
+// it grants nothing.
+func FetchFollows(ctx context.Context, pubHex string) []string {
+	filter := nostr.Filter{
+		Kinds:   []int{3},
+		Authors: []string{pubHex},
+		Limit:   1,
+	}
+	ev := QueryRelays(ctx, Relays(), filter)
+	if ev == nil {
+		return nil
+	}
+	var follows []string
+	for _, tag := range ev.Tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			follows = append(follows, tag[1])
+		}
+	}
+	return follows
 }
 
 // PublishNote publishes a kind-1 text note to Nostr.
@@ -154,5 +195,5 @@ func PublishNote(hexPrivKey, content string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return publishToRelays(ctx, LoadNostrRelays(), ev)
+	return PublishToRelays(ctx, Relays(), ev)
 }

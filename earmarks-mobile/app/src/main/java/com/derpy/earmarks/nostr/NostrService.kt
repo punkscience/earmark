@@ -79,6 +79,121 @@ class NostrService(private val httpClient: OkHttpClient) {
     }
 
     /**
+     * Fetches and decrypts an addressable kind-30001 event under an arbitrary
+     * `d` tag, self-encrypted to [privKeyHex]. Returns null when none exists.
+     *
+     * Used for channel state (`earmark-channels`), which is stored exactly like
+     * the earmark list but under a different tag.
+     */
+    suspend fun fetchSelfEncrypted(privKeyHex: String, dTag: String): String? =
+        withContext(Dispatchers.IO) {
+            val pubKeyHex = Nip44.derivePubKeyHex(privKeyHex)
+            val subscriptionId = "self-$dTag-${System.currentTimeMillis()}"
+            val reqMessage = JSONArray().apply {
+                put("REQ")
+                put(subscriptionId)
+                put(JSONObject().apply {
+                    put("kinds", JSONArray().put(30001))
+                    put("authors", JSONArray().put(pubKeyHex))
+                    put("#d", JSONArray().put(dTag))
+                    put("limit", 1)
+                })
+            }.toString()
+
+            val events = coroutineScope {
+                DEFAULT_RELAYS.map { async { queryRelay(it, reqMessage, subscriptionId) } }.awaitAll()
+            }.filterNotNull()
+
+            val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext null
+            try {
+                Nip44.decrypt(privKeyHex, best.getString("content"))
+            } catch (e: Exception) {
+                Log.w(TAG, "could not decrypt $dTag: ${e.message}")
+                null
+            }
+        }
+
+    /** Encrypts [plaintext] to the user's own key and publishes it under [dTag]. */
+    suspend fun publishSelfEncrypted(privKeyHex: String, dTag: String, plaintext: String): Int =
+        withContext(Dispatchers.IO) {
+            publishEvent(
+                NostrEvent.build(
+                    privKeyHex = privKeyHex,
+                    kind = 30001,
+                    content = Nip44.encrypt(privKeyHex, plaintext),
+                    tags = listOf(listOf("d", dTag))
+                )
+            )
+        }
+
+    /**
+     * Fetches every kind-1059 gift wrap addressed to [pubKeyHex] since
+     * [sinceEpochSeconds], deduplicated by event id.
+     *
+     * Unlike the earmark list this cannot collapse to a single newest event —
+     * gift wraps are not addressable, every one of them is a distinct message,
+     * and each relay may hold a different subset.
+     */
+    suspend fun fetchGiftWraps(pubKeyHex: String, sinceEpochSeconds: Long): List<JSONObject> =
+        withContext(Dispatchers.IO) {
+            val subscriptionId = "gw-${System.currentTimeMillis()}"
+            val reqMessage = JSONArray().apply {
+                put("REQ")
+                put(subscriptionId)
+                put(JSONObject().apply {
+                    put("kinds", JSONArray().put(GiftWrap.GIFT_WRAP_KIND))
+                    put("#p", JSONArray().put(pubKeyHex))
+                    put("since", sinceEpochSeconds)
+                })
+            }.toString()
+
+            val perRelay = coroutineScope {
+                DEFAULT_RELAYS.map { async { queryRelayAll(it, reqMessage, subscriptionId) } }.awaitAll()
+            }
+            val seen = HashSet<String>()
+            val out = mutableListOf<JSONObject>()
+            for (events in perRelay) {
+                for (ev in events) {
+                    if (seen.add(ev.optString("id"))) out.add(ev)
+                }
+            }
+            Log.d(TAG, "fetchGiftWraps: ${out.size} unique wrap(s) since $sinceEpochSeconds")
+            out
+        }
+
+    /**
+     * Fetches the user's NIP-02 contact list (kind 3) and returns the pubkeys
+     * they follow.
+     *
+     * This is used only to decide how loudly a channel invite arrives — it
+     * grants nothing and is never consulted for access. An empty result on
+     * failure is correct: nothing is marked trusted.
+     */
+    suspend fun fetchFollows(pubKeyHex: String): List<String> = withContext(Dispatchers.IO) {
+        val subscriptionId = "follows-${System.currentTimeMillis()}"
+        val reqMessage = JSONArray().apply {
+            put("REQ")
+            put(subscriptionId)
+            put(JSONObject().apply {
+                put("kinds", JSONArray().put(3))
+                put("authors", JSONArray().put(pubKeyHex))
+                put("limit", 1)
+            })
+        }.toString()
+
+        val events = coroutineScope {
+            DEFAULT_RELAYS.map { async { queryRelay(it, reqMessage, subscriptionId) } }.awaitAll()
+        }.filterNotNull()
+        val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext emptyList()
+
+        val tags = best.optJSONArray("tags") ?: return@withContext emptyList()
+        (0 until tags.length()).mapNotNull { i ->
+            val t = tags.optJSONArray(i) ?: return@mapNotNull null
+            if (t.length() >= 2 && t.optString(0) == "p") t.optString(1) else null
+        }
+    }
+
+    /**
      * Publishes [event] to all default relays in parallel. Returns the number
      * of relays that accepted it (received an "OK" message with success=true).
      */
@@ -224,5 +339,56 @@ class NostrService(private val httpClient: OkHttpClient) {
             })
             cont.invokeOnCancellation { ws.cancel() }
         }
+    }
+
+    /**
+     * Like [queryRelay] but accumulates every matching event until EOSE.
+     *
+     * Returns whatever arrived if the relay goes quiet before EOSE — a partial
+     * batch of channel messages is far better than none, and the missing ones
+     * will turn up on the next sync or from another relay.
+     */
+    private suspend fun queryRelayAll(
+        relayUrl: String,
+        reqMessage: String,
+        subscriptionId: String
+    ): List<JSONObject> {
+        val collected = mutableListOf<JSONObject>()
+        withTimeoutOrNull(20_000L) {
+            suspendCancellableCoroutine { cont ->
+                val request = Request.Builder().url(relayUrl).build()
+                val ws = httpClient.newWebSocket(request, object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send(reqMessage)
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        try {
+                            val msg = JSONArray(text)
+                            when (msg.getString(0)) {
+                                "EVENT" -> if (msg.getString(1) == subscriptionId) {
+                                    synchronized(collected) { collected.add(msg.getJSONObject(2)) }
+                                }
+                                "EOSE" -> {
+                                    webSocket.close(1000, null)
+                                    if (cont.isActive) cont.resume(Unit)
+                                }
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                })
+                cont.invokeOnCancellation { ws.cancel() }
+            }
+        }
+        return synchronized(collected) { collected.toList() }
     }
 }

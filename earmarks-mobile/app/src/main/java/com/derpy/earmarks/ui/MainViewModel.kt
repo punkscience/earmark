@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.derpy.earmarks.blossom.BlossomService
+import com.derpy.earmarks.data.ChannelInvite
+import com.derpy.earmarks.data.ChannelPost
+import com.derpy.earmarks.data.ChannelRepository
 import com.derpy.earmarks.data.Earmark
 import com.derpy.earmarks.data.earmarksToJson
 import com.derpy.earmarks.data.EarmarkCache
@@ -40,6 +43,28 @@ sealed interface AppState {
     data class Error(val message: String) : AppState
 }
 
+/**
+ * What the player is currently drawing its playlist from. Channels do not merge
+ * into the personal list — you are always listening to exactly one source, and
+ * the chip row says which.
+ */
+sealed interface PlayerSource {
+    object MyEarmarks : PlayerSource
+    data class Channel(val id: String, val name: String) : PlayerSource
+}
+
+/** Channel-related UI state, kept separate from the player's own state. */
+data class ChannelUiState(
+    val channels: List<com.derpy.earmarks.data.Channel> = emptyList(),
+    val invites: List<ChannelInvite> = emptyList(),
+    val postsByChannel: Map<String, List<ChannelPost>> = emptyMap(),
+    val source: PlayerSource = PlayerSource.MyEarmarks,
+    val syncing: Boolean = false
+) {
+    val pendingInviteCount: Int get() = invites.size
+    fun postsFor(chanId: String): List<ChannelPost> = postsByChannel[chanId] ?: emptyList()
+}
+
 /** Aggregate Blossom storage stats derived from the current earmark list. */
 data class BlossomStats(
     val totalEarmarks: Int,
@@ -48,6 +73,16 @@ data class BlossomStats(
 ) {
     val totalMb: Double get() = totalBytes / (1024.0 * 1024.0)
 }
+
+/**
+ * Where an adopted track is mirrored to. Matches the Go clients' built-in
+ * defaults; kind-10063 discovery is a desktop concern for now, so the phone
+ * mirrors to the same primary the CLI uploads to.
+ */
+private val MY_BLOSSOM_SERVERS = listOf(
+    "https://blossom.towerofsong.ca",
+    "https://blossom.band"
+)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -231,9 +266,203 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
                 _state.value = AppState.Playing(earmarks, unavailableCount)
 
+                // Channels are secondary to playback: sync after the player is
+                // running so a slow relay never delays first sound.
+                syncChannels()
+
             } catch (e: Exception) {
                 _state.value = AppState.Error(e.message ?: "Unknown error")
             }
+        }
+    }
+
+    // --- Channels -----------------------------------------------------------
+
+    private val channelRepo = ChannelRepository(nostrService)
+
+    private val _channelState = MutableStateFlow(ChannelUiState())
+    val channelState: StateFlow<ChannelUiState> = _channelState.asStateFlow()
+
+    /**
+     * Pulls channel messages, applies roster changes, and refreshes the feed.
+     *
+     * Deliberately never touches [_state]: a relay hiccup while syncing
+     * channels must not take the player down. Failures land in [_notice].
+     */
+    fun syncChannels() {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            _channelState.value = _channelState.value.copy(syncing = true)
+            try {
+                val sync = channelRepo.sync(privKeyHex)
+                _channelState.value = _channelState.value.copy(
+                    channels = sync.state.channels,
+                    invites = sync.state.invites,
+                    postsByChannel = sync.posts.groupBy { it.chan },
+                    syncing = false
+                )
+            } catch (e: Exception) {
+                _channelState.value = _channelState.value.copy(syncing = false)
+                _notice.value = "Could not sync channels: ${e.message ?: "unknown error"}"
+            }
+        }
+    }
+
+    /**
+     * Switches the player between the personal stash and a channel feed.
+     *
+     * Channel tracks are downloaded and decrypted the same way personal ones
+     * are — the file key travels inside the post, so from here on there is no
+     * difference between a track you uploaded and one someone sent you.
+     */
+    fun selectSource(source: PlayerSource) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            _channelState.value = _channelState.value.copy(source = source)
+
+            val earmarks = when (source) {
+                is PlayerSource.MyEarmarks -> currentEarmarks
+                is PlayerSource.Channel ->
+                    _channelState.value.postsFor(source.id).map { it.earmark }
+            }
+            if (earmarks.isEmpty()) {
+                // An empty channel is correct, not broken — there is no
+                // backfill, so a channel you just joined has nothing in it.
+                _state.value = AppState.Error(
+                    if (source is PlayerSource.Channel)
+                        "Nothing posted to ${source.name} yet. Tracks shared from now on appear here."
+                    else "No earmarks found"
+                )
+                return@launch
+            }
+            playSource(privKeyHex, earmarks)
+        }
+    }
+
+    /** Downloads whatever is not cached, then hands the playlist to the player. */
+    private suspend fun playSource(privKeyHex: String, earmarks: List<Earmark>) {
+        val uncached = earmarks.filter { cache.getCachedFile(it) == null }
+        for ((i, earmark) in uncached.withIndex()) {
+            _state.value = AppState.Downloading(i + 1, uncached.size)
+            try {
+                blossomService.downloadAndDecrypt(earmark, cache.targetFile(earmark), privKeyHex)
+            } catch (_: Exception) {
+            }
+        }
+        val playlist = earmarks.mapNotNull { e -> cache.getCachedFile(e)?.let { it to e } }
+        if (playlist.isEmpty()) {
+            _state.value = AppState.Error("No playable tracks available")
+            return
+        }
+        player.setPlaylist(playlist)
+        _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
+    }
+
+    /**
+     * Adopts a channel post into the user's own stash: the chunks are mirrored
+     * onto their own Blossom servers and the earmark is added to their personal
+     * list with a fresh 30-day clock they control.
+     *
+     * Nothing is re-encrypted and no audio moves through the phone — the
+     * destination servers fetch the blobs themselves.
+     */
+    fun keepPost(post: ChannelPost) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            val manifest = post.earmark.blossom ?: return@launch
+            try {
+                val mirrored = manifest.chunks.map { chunk ->
+                    val hosted = blossomService.mirrorChunk(chunk, MY_BLOSSOM_SERVERS, privKeyHex)
+                    chunk.copy(servers = (hosted + chunk.servers).distinct())
+                }
+                val adopted = post.earmark.copy(
+                    ts = System.currentTimeMillis() / 1000,
+                    blossom = manifest.copy(chunks = mirrored)
+                )
+                val updated = currentEarmarks + adopted
+                if (publishWithRetry(privKeyHex, updated) == 0) {
+                    _notice.value = "Could not save to your list — no relay accepted it."
+                    return@launch
+                }
+                currentEarmarks = updated
+                recomputeStats()
+                _notice.value = "Kept \"${post.earmark.title}\". It is yours now, " +
+                    "with a fresh 30-day clock."
+            } catch (e: Exception) {
+                _notice.value = "Could not keep that track: ${e.message ?: "unknown error"}"
+            }
+        }
+    }
+
+    /**
+     * Posts a track already held — one of your own, or one received from
+     * another channel — into [chanId]. Zero bytes move: the post hands over the
+     * existing chunk hashes and file key.
+     */
+    fun shareToChannel(earmark: Earmark, chanId: String) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            val name = _channelState.value.channels
+                .firstOrNull { it.descriptor.id == chanId }?.descriptor?.name ?: "channel"
+            channelRepo.post(privKeyHex, chanId, earmark)
+                .onSuccess { _notice.value = "Shared \"${earmark.title}\" to $name." }
+                .onFailure {
+                    _notice.value = "Could not share to $name: ${it.message ?: "unknown error"}"
+                }
+        }
+    }
+
+    /**
+     * Keeps whatever is playing, when it came from a channel. Resolves the
+     * playing earmark back to its post so the original chunk servers are known
+     * — those are what the mirror copies from.
+     */
+    fun keepCurrentChannelTrack() {
+        val playing = player.currentEarmark() ?: return
+        val source = _channelState.value.source as? PlayerSource.Channel ?: return
+        val post = _channelState.value.postsFor(source.id).firstOrNull { it.earmark.ts == playing.ts }
+        if (post == null) {
+            _notice.value = "That track is no longer in the channel feed."
+            return
+        }
+        keepPost(post)
+    }
+
+    /** Shares whatever is playing into [chanId], from either source. */
+    fun shareCurrentTrack(chanId: String) {
+        val playing = player.currentEarmark() ?: return
+        shareToChannel(playing, chanId)
+    }
+
+    fun acceptInvite(chanId: String) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            channelRepo.acceptInvite(privKeyHex, chanId)
+                .onSuccess { channel ->
+                    _notice.value = "Joined \"${channel.descriptor.name}\". " +
+                        "Tracks posted from now on will appear here — channels do not backfill."
+                    syncChannels()
+                }
+                .onFailure { _notice.value = it.message ?: "Could not accept that invite." }
+        }
+    }
+
+    fun declineInvite(chanId: String) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            channelRepo.declineInvite(privKeyHex, chanId)
+            syncChannels()
+        }
+    }
+
+    fun leaveChannel(chanId: String) {
+        viewModelScope.launch {
+            val privKeyHex = keyStore.getKey() ?: return@launch
+            channelRepo.leave(privKeyHex, chanId)
+            if ((_channelState.value.source as? PlayerSource.Channel)?.id == chanId) {
+                selectSource(PlayerSource.MyEarmarks)
+            }
+            syncChannels()
         }
     }
 

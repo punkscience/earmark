@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
                         val playerState by vm.playerState.collectAsState()
                         val stats by vm.stats.collectAsState()
                         val notice by vm.notice.collectAsState()
+                        val channelState by vm.channelState.collectAsState()
 
                         if (appState is AppState.KeyMissing) {
                             KeyEntryScreen(onSaveKey = { vm.saveKey(it) })
@@ -59,12 +60,18 @@ class MainActivity : ComponentActivity() {
                                 playerState = playerState,
                                 stats = stats,
                                 notice = notice,
+                                channelState = channelState,
                                 onDismissNotice = { vm.dismissNotice() },
                                 onPlayPause = { vm.player.playPause() },
                                 onSkipNext = { vm.player.skipNext() },
                                 onSkipPrevious = { vm.player.skipPrevious() },
                                 onDeleteCurrent = { vm.deleteCurrent() },
-                                onClearKey = { vm.clearKey() }
+                                onClearKey = { vm.clearKey() },
+                                onSelectSource = { vm.selectSource(it) },
+                                onAcceptInvite = { vm.acceptInvite(it) },
+                                onDeclineInvite = { vm.declineInvite(it) },
+                                onKeepCurrent = { vm.keepCurrentChannelTrack() },
+                                onShareCurrent = { vm.shareCurrentTrack(it) }
                             )
                         }
                     }

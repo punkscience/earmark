@@ -10,8 +10,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.bouncycastle.crypto.engines.AESEngine
 import org.bouncycastle.crypto.modes.GCMBlockCipher
 import org.bouncycastle.crypto.params.AEADParameters
@@ -172,6 +174,52 @@ class BlossomService(private val httpClient: OkHttpClient) {
         return httpClient.newCall(request).execute().use { response ->
             response.isSuccessful || response.code == 404
         }
+    }
+
+    /**
+     * Asks each of [destinationServers] to copy the chunk onto itself from a
+     * server that already holds it (BUD-04 `PUT /mirror`).
+     *
+     * The destination server fetches the bytes directly, so **no audio passes
+     * through the phone**. That is what makes adopting a channel post viable on
+     * a metered connection; a download-and-reupload would move the file twice.
+     *
+     * Returns the servers now hosting the chunk. A server that does not
+     * implement `/mirror` is simply left out — the caller keeps the original
+     * servers in the manifest, so the track stays playable either way, it just
+     * is not independently hosted.
+     */
+    suspend fun mirrorChunk(
+        chunk: Chunk,
+        destinationServers: List<String>,
+        privKeyHex: String
+    ): List<String> = withContext(Dispatchers.IO) {
+        val source = chunk.servers.firstOrNull() ?: return@withContext emptyList()
+        val sourceUrl = "${source.trimEnd('/')}/${chunk.sha256}"
+
+        coroutineScope {
+            destinationServers.map { dest ->
+                async {
+                    try {
+                        val token = blossomAuthToken(privKeyHex, chunk.sha256, "upload")
+                        val body = org.json.JSONObject()
+                            .put("url", sourceUrl)
+                            .toString()
+                            .toRequestBody("application/json".toMediaType())
+                        val request = Request.Builder()
+                            .url("${dest.trimEnd('/')}/mirror")
+                            .put(body)
+                            .header("Authorization", "Nostr $token")
+                            .build()
+                        httpClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) dest else null
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+            }.awaitAll()
+        }.filterNotNull()
     }
 
     /**
