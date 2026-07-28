@@ -75,6 +75,17 @@ data class BlossomStats(
 }
 
 /**
+ * The least time between two foreground-triggered channel syncs. Long enough
+ * that flipping between apps costs no relay traffic, short enough that "make a
+ * channel on the desktop, pick up the phone" just works.
+ */
+internal const val CHANNEL_RESYNC_MIN_INTERVAL_MS = 60_000L
+
+/** Whether enough time has passed since [lastSyncMs] to warrant another sync. */
+internal fun shouldResyncChannels(lastSyncMs: Long, nowMs: Long): Boolean =
+    lastSyncMs == 0L || nowMs - lastSyncMs >= CHANNEL_RESYNC_MIN_INTERVAL_MS
+
+/**
  * Where an adopted track is mirrored to. Matches the Go clients' built-in
  * defaults; kind-10063 discovery is a desktop concern for now, so the phone
  * mirrors to the same primary the CLI uploads to.
@@ -283,6 +294,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _channelState = MutableStateFlow(ChannelUiState())
     val channelState: StateFlow<ChannelUiState> = _channelState.asStateFlow()
 
+    /** When the last channel sync started, for [syncChannelsIfStale]'s throttle. */
+    private var lastChannelSyncMs = 0L
+
+    /**
+     * Re-syncs channels when the last sync is old enough to matter.
+     *
+     * Called on every return to the foreground. Channel state changes on other
+     * devices while this process sits cached in the background — without this,
+     * a channel created on the desktop never appears until Android happens to
+     * kill the process. Skipped until the player is up, because startup has its
+     * own sync and channels stay secondary to first sound.
+     */
+    fun syncChannelsIfStale(nowMs: Long = System.currentTimeMillis()) {
+        if (_state.value !is AppState.Playing) return
+        if (_channelState.value.syncing) return
+        if (!shouldResyncChannels(lastChannelSyncMs, nowMs)) return
+        syncChannels()
+    }
+
     /**
      * Pulls channel messages, applies roster changes, and refreshes the feed.
      *
@@ -292,6 +322,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun syncChannels() {
         viewModelScope.launch {
             val privKeyHex = keyStore.getKey() ?: return@launch
+            lastChannelSyncMs = System.currentTimeMillis()
             _channelState.value = _channelState.value.copy(syncing = true)
             try {
                 val sync = channelRepo.sync(privKeyHex)
