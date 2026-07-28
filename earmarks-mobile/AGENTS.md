@@ -1,14 +1,16 @@
 # AGENTS.md
 
-Universal context for any AI coding agent (Codex, Cursor, Copilot, Gemini, Claude, etc.) operating in this repository.
+Universal context for any AI coding agent (Codex, Cursor, Copilot, Gemini, Claude, etc.) operating in the `earmarks-mobile/` subproject. Read the repo-root `AGENTS.md` first — it covers the monorepo layout and the protocol invariants shared with the CLI.
 
 ## Project Overview
 
-**Earmarks** is a minimal Android app (Kotlin + Jetpack Compose) that reads a user's *derpy* earmark list from Nostr, downloads their earmarked audio files from Blossom servers, decrypts them, caches them locally, and plays them in a shuffled playlist. Audio persists in the background and the app is Android Auto compatible.
+**earmarks-mobile** is a minimal Android app (Kotlin + Jetpack Compose) that reads a user's *derpy* earmark list from Nostr, downloads their earmarked audio files from Blossom servers, decrypts them, caches them locally, and plays them in a shuffled playlist. Audio persists in the background and the app is Android Auto compatible.
 
-Full protocol spec: `docs/ANDROID_EARMARKS_SPEC.md`
+Full protocol spec: `../docs/PROTOCOL.md`
 
 ## Build Commands
+
+Run from `earmarks-mobile/` — the Gradle build is rooted here, not at the repo root.
 
 ```bash
 ./gradlew assembleDebug        # build debug APK
@@ -23,7 +25,7 @@ Full protocol spec: `docs/ANDROID_EARMARKS_SPEC.md`
 ## Architecture
 
 ```
-app/src/main/java/com/derpy/earmarks/
+earmarks-mobile/app/src/main/java/com/derpy/earmarks/
 ├── MainActivity.kt            — Compose entry: routes to KeyEntryScreen or PlayerScreen
 ├── EarmarksApplication.kt     — Application subclass (referenced in manifest)
 ├── data/
@@ -86,14 +88,4 @@ The rust-nostr Android SDK (`org.rust-nostr:nostr-sdk`) doesn't yet expose NIP-4
 
 ## Agent skills
 
-### Issue tracker
-
-Issues live in GitHub Issues at github.com/punkscience/earmarks. Skills use the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default vocabulary — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout — one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Repo-wide — see the root `AGENTS.md` and `../docs/agents/`.

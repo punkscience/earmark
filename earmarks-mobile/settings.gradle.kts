@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "earmarks"
+rootProject.name = "earmarks-mobile"
 include(":app")

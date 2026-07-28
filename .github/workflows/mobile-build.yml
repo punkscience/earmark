@@ -1,14 +1,21 @@
-name: Build APK
+name: Build Mobile APK
 
 # CI runs on PRs for verification, and on manual dispatch for release builds.
 # No push trigger — merges don't fire wasteful CI runs.
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'earmarks-mobile/**'
+      - '.github/workflows/mobile-build.yml'
   workflow_dispatch:
 
 permissions:
   contents: write # needed to create the Release
+
+defaults:
+  run:
+    working-directory: earmarks-mobile
 
 jobs:
   build:
@@ -36,18 +43,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: earmarks-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: earmarks-mobile/app/build/outputs/apk/debug/app-debug.apk
 
       # Publish a Release with the APK — only on manual dispatch, not PR checks.
+      # Tags are prefixed `mobile-` so CLI releases share the repo without collision.
       - name: Publish release
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="build-${{ github.run_number }}"
+          TAG="mobile-build-${{ github.run_number }}"
           gh release create "$TAG" \
             app/build/outputs/apk/debug/app-debug.apk \
-            --title "Earmarks build ${{ github.run_number }}" \
+            --title "Earmarks mobile build ${{ github.run_number }}" \
             --notes "Automated debug build from ${{ github.sha }}. Download \`app-debug.apk\` and sideload it (enable install from unknown sources)." \
             --prerelease
 
@@ -58,13 +66,14 @@ jobs:
           curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
             -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
             -F document=@app/build/outputs/apk/debug/app-debug.apk \
-            -F caption="🎵 Earmarks build ${{ github.run_number }} — tap to install"
+            -F caption="🎵 Earmarks mobile build ${{ github.run_number }} — tap to install"
 
-      # Purge old releases to stay under the 0.5GB free-tier storage cap.
-      # Keeps only the latest release.
+      # Purge old mobile releases to stay under the 0.5GB free-tier storage cap.
+      # Keeps only the latest; `mobile-` prefix filter leaves CLI releases alone.
       - name: Purge old releases
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release list --limit 100 --json tagName --jq '.[1:].[].tagName' | xargs -r -n1 gh release delete --cleanup-tag -y
+          gh release list --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("mobile-"))][1:][].tagName' \
+            | xargs -r -n1 gh release delete --cleanup-tag -y

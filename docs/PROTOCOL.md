@@ -1,6 +1,8 @@
-# derpy Android Earmarks Player — Implementation Spec
+# Earmark Protocol Spec
 
-This document contains everything needed to build an Android application that reads a user's derpy earmark list from Nostr, downloads their earmarked audio files from Blossom servers, decrypts them, and plays them as a playlist.
+Canonical reference for the earmark wire protocol — the contract between `earmark-cli/` (producer) and `earmarks-mobile/` (consumer). Both must agree on everything here; change one side and you must change the other.
+
+Written originally as the Android implementation spec, so it is phrased from the consumer's side: everything needed to build an application that reads a user's derpy earmark list from Nostr, downloads their earmarked audio files from Blossom servers, decrypts them, and plays them as a playlist. The CLI implements the mirror image — encrypt, chunk, upload, publish.
 
 ---
 

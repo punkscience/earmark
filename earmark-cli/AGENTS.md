@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Universal context for any AI coding agent working in this repository.
+Universal context for any AI coding agent working in the `earmark-cli/` subproject. Read the repo-root `AGENTS.md` first — it covers the monorepo layout and the protocol invariants shared with the Android app in `earmarks-mobile/`.
 
 ## Project
 
@@ -65,6 +65,8 @@ Input (file or playlist entry)
 - Survives restarts; no data loss on [E] press even when offline
 
 ## Build & run
+
+Run from `earmark-cli/` — the Go module is rooted here, not at the repo root.
 
 ```bash
 go mod tidy

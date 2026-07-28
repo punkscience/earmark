@@ -1,0 +1,7 @@
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+.claude/
+
+# Per-project ignores live in earmark-cli/.gitignore and earmarks-mobile/.gitignore
