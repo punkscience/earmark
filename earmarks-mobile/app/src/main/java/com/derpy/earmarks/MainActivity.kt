@@ -17,6 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.derpy.earmarks.ui.AppState
 import com.derpy.earmarks.ui.KeyEntryScreen
@@ -51,6 +55,20 @@ class MainActivity : ComponentActivity() {
                         val stats by vm.stats.collectAsState()
                         val notice by vm.notice.collectAsState()
                         val channelState by vm.channelState.collectAsState()
+
+                        // Channel state lives on the relays and changes from
+                        // other devices while this process sits cached in the
+                        // background. Re-sync (throttled) every time the user
+                        // comes back, or a channel created on the desktop never
+                        // shows up until Android kills the process.
+                        val lifecycleOwner = LocalLifecycleOwner.current
+                        DisposableEffect(lifecycleOwner) {
+                            val observer = LifecycleEventObserver { _, event ->
+                                if (event == Lifecycle.Event.ON_RESUME) vm.syncChannelsIfStale()
+                            }
+                            lifecycleOwner.lifecycle.addObserver(observer)
+                            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                        }
 
                         if (appState is AppState.KeyMissing) {
                             KeyEntryScreen(onSaveKey = { vm.saveKey(it) })
