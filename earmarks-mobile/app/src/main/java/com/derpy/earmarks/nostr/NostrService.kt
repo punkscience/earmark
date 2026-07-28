@@ -22,11 +22,12 @@ import kotlin.coroutines.resume
 
 private const val TAG = "NostrService"
 
+// Deliberately short. relay.damus.io has been serving intermittent 503s and
+// nostr.wine is pay-to-write, so it silently holds none of this user's events —
+// a relay that stores nothing still costs every query a connection.
 private val DEFAULT_RELAYS = listOf(
     "wss://relay.towerofsong.ca",
-    "wss://relay.damus.io",
-    "wss://relay.primal.net",
-    "wss://nostr.wine"
+    "wss://relay.primal.net"
 )
 
 /**

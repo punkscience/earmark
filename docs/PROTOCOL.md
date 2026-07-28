@@ -69,9 +69,7 @@ Connect to one or more Nostr relays via WebSocket and send:
 **Default relays** (use any, or all in parallel):
 ```
 wss://relay.towerofsong.ca
-wss://relay.damus.io
 wss://relay.primal.net
-wss://nostr.wine
 ```
 
 When querying multiple relays in parallel, keep the event with the highest `created_at` timestamp.
@@ -569,11 +567,13 @@ To post an earmark to a channel:
 
 1. Load the current roster from channel state.
 2. Build the `post` envelope once.
-3. For each member **other than yourself**, generate a fresh ephemeral key and emit one gift wrap.
+3. For **every member — yourself included** — generate a fresh ephemeral key and emit one gift wrap.
 4. Publish all wraps to the configured relays.
 5. Record a pin (below).
 
-Fan-out is `members - 1` events per post. At the design scale (≤ 10 members) this is trivial; implementations should still stagger publishes to avoid tripping relay rate limits.
+The self-addressed wrap is what makes your own posts appear on your own other devices: a channel is a group the sender participates in, not just broadcasts to. Posting is still rejected when the roster contains nobody else — the personal earmark list already covers talking to yourself.
+
+Fan-out is `members` events per post. At the design scale (≤ 10 members) this is trivial; implementations should still stagger publishes to avoid tripping relay rate limits.
 
 ## Retention
 
@@ -638,7 +638,7 @@ Web of trust does **not** grant access and is not a discovery mechanism. Members
 | AES key size | 32 bytes (AES-256) |
 | AES-GCM nonce size | 12 bytes |
 | AES-GCM tag size | 16 bytes |
-| Default relays | relay.towerofsong.ca, damus.io, relay.primal.net, nostr.wine |
+| Default relays | relay.towerofsong.ca, relay.primal.net |
 | Default Blossom servers | blossom.band, cdn.satellite.earth, nostr.build |
 
 ---

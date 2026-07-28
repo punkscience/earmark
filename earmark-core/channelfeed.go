@@ -9,12 +9,13 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// PostToChannel sends an earmark to every other member of a channel and pins
-// its chunks so the caller's own purge cannot break the recipients' copies.
+// PostToChannel sends an earmark to every member of a channel — the sender
+// included, so their own other devices see the post too — and pins its chunks
+// so the caller's own purge cannot break the recipients' copies.
 //
 // Nothing is uploaded: the earmark already lives on Blossom, and the post hands
 // over the same chunk hashes and the same file key. Cost is one gift wrap per
-// recipient.
+// member.
 func PostToChannel(ctx context.Context, hexPrivKey, nameOrID string, e Earmark) error {
 	if e.Blossom == nil {
 		return fmt.Errorf("%q was never uploaded — there is nothing to share", e.Title)
@@ -31,14 +32,9 @@ func PostToChannel(ctx context.Context, hexPrivKey, nameOrID string, e Earmark) 
 	if err != nil {
 		return err
 	}
-	recipients := make([]string, 0, len(ch.Members))
-	for _, m := range ch.Members {
-		if m != pubHex {
-			recipients = append(recipients, m)
-		}
-	}
-	if len(recipients) == 0 {
-		return fmt.Errorf("%q has no other members yet — invite someone first", ch.Descriptor.Name)
+	recipients, err := postRecipients(ch, pubHex)
+	if err != nil {
+		return err
 	}
 
 	// The originating file path is meaningless to anyone else, and naming a
@@ -74,6 +70,25 @@ func PostToChannel(ctx context.Context, hexPrivKey, nameOrID string, e Earmark) 
 	st.Pins = append(st.Pins, ChannelPin{Chan: ch.Descriptor.ID, Chunks: chunks, PostedAt: now})
 	st.dropExpiredPins(time.Now())
 	return SaveChannelState(ctx, hexPrivKey, st)
+}
+
+// postRecipients returns who a post to ch fans out to: every member, the
+// sender included. Wrapping for yourself is what lets your own other devices
+// show the post — a channel is a group the sender participates in, not just
+// broadcasts to. It is still an error to post into a room with nobody else,
+// because the personal earmark list already covers talking to yourself.
+func postRecipients(ch *Channel, selfPub string) ([]string, error) {
+	hasOthers := false
+	for _, m := range ch.Members {
+		if m != selfPub {
+			hasOthers = true
+			break
+		}
+	}
+	if !hasOthers {
+		return nil, fmt.Errorf("%q has no other members yet — invite someone first", ch.Descriptor.Name)
+	}
+	return append([]string{}, ch.Members...), nil
 }
 
 // SyncChannels fetches gift wraps addressed to the user, applies every roster,

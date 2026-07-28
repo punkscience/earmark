@@ -15,9 +15,7 @@ private const val TAG = "ChannelRepository"
  */
 private val DEFAULT_INBOX_RELAYS = listOf(
     "wss://relay.towerofsong.ca",
-    "wss://relay.damus.io",
-    "wss://relay.primal.net",
-    "wss://nostr.wine"
+    "wss://relay.primal.net"
 )
 
 /** Result of a channel sync: the live posts plus the state they were judged against. */
@@ -148,12 +146,10 @@ class ChannelRepository(private val nostr: NostrService) {
             val channel = state.find(chanId)
                 ?: return@withContext Result.failure(IllegalArgumentException("unknown channel"))
 
-            val recipients = channel.members.filter { it != myPub }
-            if (recipients.isEmpty()) {
-                return@withContext Result.failure(
+            val recipients = postRecipients(channel, myPub)
+                ?: return@withContext Result.failure(
                     IllegalStateException("${channel.descriptor.name} has no other members yet")
                 )
-            }
 
             val now = System.currentTimeMillis() / 1000
             val envelope = Envelope(
@@ -256,6 +252,18 @@ class ChannelRepository(private val nostr: NostrService) {
             )
         )
     }
+}
+
+/**
+ * Who a post fans out to: every member, the sender included. Wrapping for
+ * yourself is what lets your own other devices show the post — a channel is a
+ * group the sender participates in, not just broadcasts to. Returns null when
+ * the room has nobody else in it; the personal earmark list already covers
+ * talking to yourself. Mirrors `earmark-core`'s `postRecipients`.
+ */
+internal fun postRecipients(channel: Channel, myPub: String): List<String>? {
+    if (channel.members.none { it != myPub }) return null
+    return channel.members
 }
 
 // --- Rule application --------------------------------------------------------
