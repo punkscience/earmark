@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Punk Science ground: solid Hardcore Black (#0E0E10). The mark reverses on ink
+  per the brand's "reversed on ink" lockup, with acid build dots in the foreground.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"
+        android:fillColor="#0E0E10" />
+</vector>

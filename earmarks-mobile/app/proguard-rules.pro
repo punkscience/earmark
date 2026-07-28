@@ -1,0 +1,3 @@
+-keep class org.bouncycastle.** { *; }
+-keep class androidx.media3.** { *; }
+-dontwarn org.bouncycastle.**

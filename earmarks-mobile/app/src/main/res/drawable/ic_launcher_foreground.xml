@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Punk Science mark: three build bubbles on the centre-line, Build Acid (#D6FF3F).
+  Opacity gradation 100 / 60 / 30, full dot leads left, faintest trails right.
+  Sized to sit inside the adaptive-icon safe zone (inner 66dp of the 108 viewport).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#D6FF3F"
+        android:fillAlpha="1.0"
+        android:pathData="M35.4,54 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path
+        android:fillColor="#D6FF3F"
+        android:fillAlpha="0.6"
+        android:pathData="M54,54 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path
+        android:fillColor="#D6FF3F"
+        android:fillAlpha="0.3"
+        android:pathData="M72.6,54 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+</vector>

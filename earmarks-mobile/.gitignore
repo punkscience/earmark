@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+**/build/
+local.properties
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+.claude/
+
+# Signing
+*.jks
+*.keystore
+
+# Generated
+app/src/main/assets/
+
+# Standalone Gradle install (not needed, project uses wrapper)
+~/gradle/
+.kotlin/
