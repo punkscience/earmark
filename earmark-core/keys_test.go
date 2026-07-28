@@ -149,3 +149,31 @@ func TestUnionStrings_Empty(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 }
+
+// Ported from derpy alongside the outbox-model change; the code it covers
+// now lives here.
+// TestParseWriteRelays verifies NIP-65 kind-10002 tag parsing: bare r tags
+// count as read+write, "write" markers are included, "read" markers excluded.
+func TestParseWriteRelays(t *testing.T) {
+	ev := &nostr.Event{
+		Kind: 10002,
+		Tags: nostr.Tags{
+			{"r", "wss://both.example.com"},           // no marker → read+write
+			{"r", "wss://write.example.com", "write"}, // explicit write
+			{"r", "wss://read.example.com", "read"},   // read-only → excluded
+			{"e", "not-a-relay-tag"},                  // ignored
+			{"r"},                                     // malformed → ignored
+		},
+	}
+
+	got := ParseWriteRelays(ev)
+	want := []string{"wss://both.example.com", "wss://write.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] got %q, want %q", i, got[i], want[i])
+		}
+	}
+}

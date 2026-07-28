@@ -21,7 +21,7 @@ Module path is `github.com/punkscience/earmark/earmark-core`. `earmark-cli` reso
 |------|------|
 | `settings.go` | `Settings` + `Configure` — the only configuration seam. Relay list, Blossom server list, upload idle timeout, and their defaults. |
 | `keys.go` | nsec/npub ↔ hex conversion, pubkey derivation |
-| `relay.go` | Relay publish and query helpers, NIP-65 write-relay discovery, NIP-02 follow list, kind-1 notes |
+| `relay.go` | Relay publish/query helpers, the NIP-65 outbox relay set, NIP-02 follow list, kind-1 notes |
 | `blossom.go` | AES-256-GCM chunk encryption, 16 MiB chunking, BUD-01/11 upload/download/delete, kind-24242 auth tokens, kind-10063 server discovery, reassembly |
 | `list.go` | The NIP-51 kind-30001 earmark list: NIP-44 self-encryption, CRUD, legacy-tag migration, 30-day purge |
 
@@ -40,6 +40,25 @@ core.Configure(core.Settings{
 Empty fields fall back to built-in defaults. Call it again after any config change — `earmark-cli` does this from `SaveConfig`.
 
 The one exception is `EARMARK_UPLOAD_IDLE_TIMEOUT` (seconds), read directly from the environment because it applies identically to every host and overrides the configured value.
+
+## The outbox model
+
+A user's own addressable events — the earmark list and channel state — are
+published to, and read from, `UserPublishRelays(pubHex)`: their NIP-65 write
+relays unioned with the configured list. Publishing only to the configured
+relays means another install, or any client reading their relay list, cannot
+find them.
+
+kind-10002 lookups also query indexer relays (purplepag.es, relay.nostr.band),
+because the relay list was probably published from a different client. Lookups
+are TTL-cached for 15 minutes, empty results included, so an offline session
+does not pay the timeout on every publish.
+
+> **Gift wraps deliberately do not use this.** Channel messages go to the
+> *recipient*, so the correct target is their inbox relays (NIP-17 kind 10050),
+> not the sender's outbox. They currently publish to the configured set, which
+> works when members share relays and does not when they do not. See the
+> follow-up issue.
 
 ## Conventions
 

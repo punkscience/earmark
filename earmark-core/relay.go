@@ -3,10 +3,21 @@ package earmark
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// nip65IndexRelays are read-only indexer relays that aggregate kind-10002
+// relay lists from across the network. They are queried in addition to the
+// configured relays when looking up a user's NIP-65 relay list, because the
+// user may have published that list from another client to relays this app
+// knows nothing about. purplepag.es is the canonical NIP-65 index.
+var nip65IndexRelays = []string{
+	"wss://purplepag.es",
+	"wss://relay.nostr.band",
+}
 
 // PublishToRelays publishes ev to every relay concurrently. It succeeds if at
 // least one relay accepts the event.
@@ -132,19 +143,31 @@ func unionStrings(a, b []string) []string {
 	return out
 }
 
-// FetchUserWriteRelays fetches the user's NIP-65 relay list (kind 10002).
+// FetchUserWriteRelays fetches the user's NIP-65 relay list (kind 10002) and
+// returns the URLs they have marked write (or read+write).
+//
+// The query goes to the configured relays plus the NIP-65 indexer relays, so a
+// relay list published from another client is still found. Returns nil when no
+// relay list exists, so callers can fall back.
 func FetchUserWriteRelays(ctx context.Context, pubHex string) []string {
 	filter := nostr.Filter{
 		Kinds:   []int{10002},
 		Authors: []string{pubHex},
 		Limit:   1,
 	}
-	ev := QueryRelays(ctx, Relays(), filter)
+	ev := QueryRelays(ctx, unionStrings(Relays(), nip65IndexRelays), filter)
 	if ev == nil {
 		return nil
 	}
+	return ParseWriteRelays(ev)
+}
+
+// ParseWriteRelays extracts the write (or read+write) relay URLs from a
+// kind-10002 NIP-65 relay list event.
+func ParseWriteRelays(ev *nostr.Event) []string {
 	var relays []string
 	for _, tag := range ev.Tags {
+		// NIP-65 relay tag: ["r", "wss://...", ("read"|"write")?]
 		if len(tag) < 2 || tag[0] != "r" {
 			continue
 		}
@@ -153,6 +176,51 @@ func FetchUserWriteRelays(ctx context.Context, pubHex string) []string {
 		}
 	}
 	return relays
+}
+
+// nip65Cache memoises the user's NIP-65 write relays so repeated publishes in
+// one session don't re-query the network every time. Empty results are cached
+// too, so an offline session doesn't pay the lookup timeout on every publish.
+var nip65Cache = struct {
+	sync.Mutex
+	pubHex    string
+	relays    []string
+	fetchedAt time.Time
+}{}
+
+// nip65CacheTTL is how long a cached NIP-65 lookup stays fresh.
+const nip65CacheTTL = 15 * time.Minute
+
+// UserPublishRelays returns the outbox relay set for the user's own events:
+// their NIP-65 write relays unioned with the configured relay list.
+//
+// This is the outbox model. A user's own addressable events belong wherever
+// their profile is read from, not just on whichever relays this install
+// happens to be configured with — otherwise another client, or the same app on
+// another machine, cannot find them.
+//
+// The NIP-65 lookup has its own short timeout and is TTL-cached. When it fails
+// or the user has no relay list, the configured relays are used alone.
+func UserPublishRelays(pubHex string) []string {
+	nip65Cache.Lock()
+	if nip65Cache.pubHex == pubHex && time.Since(nip65Cache.fetchedAt) < nip65CacheTTL {
+		cached := nip65Cache.relays
+		nip65Cache.Unlock()
+		return unionStrings(cached, Relays())
+	}
+	nip65Cache.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	writeRelays := FetchUserWriteRelays(ctx, pubHex)
+	cancel()
+
+	nip65Cache.Lock()
+	nip65Cache.pubHex = pubHex
+	nip65Cache.relays = writeRelays
+	nip65Cache.fetchedAt = time.Now()
+	nip65Cache.Unlock()
+
+	return unionStrings(writeRelays, Relays())
 }
 
 // FetchFollows fetches the user's NIP-02 contact list (kind 3) and returns the

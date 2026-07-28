@@ -63,7 +63,12 @@ func fetchEarmarksCtx(ctx context.Context, hexPrivKey string) ([]Earmark, error)
 	return decryptEarmarks(latest, convKey)
 }
 
-// fetchEarmarkEvent fetches the latest kind-30001 earmark event with the given d tag.
+// fetchEarmarkEvent fetches the latest kind-30001 addressable event with the
+// given d tag.
+//
+// Reads from the user's outbox set (NIP-65 write relays ∪ configured relays),
+// which is the same set it is published to — so the newest version is found
+// even when the configured relays and the user's relay list do not overlap.
 func fetchEarmarkEvent(ctx context.Context, pubHex, dTag string) *nostr.Event {
 	filter := nostr.Filter{
 		Kinds:   []int{earmarkKind},
@@ -71,7 +76,7 @@ func fetchEarmarkEvent(ctx context.Context, pubHex, dTag string) *nostr.Event {
 		Tags:    nostr.TagMap{"d": []string{dTag}},
 		Limit:   1,
 	}
-	return QueryRelays(ctx, Relays(), filter)
+	return QueryRelays(ctx, UserPublishRelays(pubHex), filter)
 }
 
 func decryptEarmarks(ev *nostr.Event, convKey [32]byte) ([]Earmark, error) {
@@ -291,7 +296,10 @@ func publishEarmarks(ctx context.Context, hexPrivKey string, earmarks []Earmark)
 	if err := ev.Sign(hexPrivKey); err != nil {
 		return fmt.Errorf("could not sign earmark event: %w", err)
 	}
-	return PublishToRelays(ctx, Relays(), ev)
+	// Outbox model: the user's own addressable events belong on their NIP-65
+	// write relays, not just this install's configured set — otherwise another
+	// install, or any client reading their relay list, cannot find them.
+	return PublishToRelays(ctx, UserPublishRelays(pubHex), ev)
 }
 
 // NukeEarmarks deletes every Blossom chunk for every earmark and then

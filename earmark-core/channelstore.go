@@ -192,5 +192,7 @@ func SaveChannelState(ctx context.Context, hexPrivKey string, st *ChannelState) 
 	if err := ev.Sign(hexPrivKey); err != nil {
 		return fmt.Errorf("could not sign channel state event: %w", err)
 	}
-	return PublishToRelays(ctx, Relays(), ev)
+	// Same outbox reasoning as the earmark list: channel state is how a second
+	// device recovers its channels, so it has to land where that device looks.
+	return PublishToRelays(ctx, UserPublishRelays(pubHex), ev)
 }
