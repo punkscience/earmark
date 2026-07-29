@@ -86,6 +86,15 @@ internal fun shouldResyncChannels(lastSyncMs: Long, nowMs: Long): Boolean =
     lastSyncMs == 0L || nowMs - lastSyncMs >= CHANNEL_RESYNC_MIN_INTERVAL_MS
 
 /**
+ * App states a foreground channel re-sync may run in: the player is up, or
+ * startup settled on an error screen. Never mid-startup — Loading and
+ * Downloading run their own sync when they finish — and never before a key
+ * exists.
+ */
+internal fun canSyncChannels(state: AppState): Boolean =
+    state is AppState.Playing || state is AppState.Error
+
+/**
  * Where an adopted track is mirrored to. Matches the Go clients' built-in
  * defaults; kind-10063 discovery is a desktop concern for now, so the phone
  * mirrors to the same primary the CLI uploads to.
@@ -192,7 +201,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 if (earmarks.isEmpty()) {
-                    _state.value = AppState.Error("No earmarks found")
+                    _state.value = AppState.Error(
+                        "No earmarks in your stash yet. Channel invites and " +
+                            "shared tracks still appear in the row above."
+                    )
+                    // An invited account starts with an empty stash — channels
+                    // are how music first arrives. Bailing without this sync
+                    // would leave a pending invite invisible forever.
+                    syncChannels()
                     return@launch
                 }
 
@@ -256,6 +272,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             "$unavailableCount earmark(s) couldn't be fetched — try again later."
                         else "No playable tracks available"
                     )
+                    // Channels are independent of the personal stash; a failed
+                    // download session must not hide them.
+                    syncChannels()
                     return@launch
                 }
 
@@ -303,11 +322,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Called on every return to the foreground. Channel state changes on other
      * devices while this process sits cached in the background — without this,
      * a channel created on the desktop never appears until Android happens to
-     * kill the process. Skipped until the player is up, because startup has its
-     * own sync and channels stay secondary to first sound.
+     * kill the process. Skipped while startup is still in flight, because
+     * startup runs its own sync and channels stay secondary to first sound —
+     * but allowed in Error: an invited account with an empty stash lives on
+     * that screen, and channels are how music first arrives for it.
      */
     fun syncChannelsIfStale(nowMs: Long = System.currentTimeMillis()) {
-        if (_state.value !is AppState.Playing) return
+        if (!canSyncChannels(_state.value)) return
         if (_channelState.value.syncing) return
         if (!shouldResyncChannels(lastChannelSyncMs, nowMs)) return
         syncChannels()
