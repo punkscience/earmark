@@ -124,12 +124,14 @@ class BlossomServiceDownloadAuthTest {
     fun downloadsFromAuthRequiringServer() = runBlocking {
         val service = BlossomService(OkHttpClient())
         val dest = File.createTempFile("earmark-test", ".mp3")
+        val part = File.createTempFile("earmark-test", ".mp3.part")
         try {
-            val result = service.downloadAndDecrypt(earmark(), dest, privKeyHex)
+            val result = service.downloadAndDecrypt(earmark(), dest, part, privKeyHex)
             assertEquals(BlossomService.DownloadResult.Success, result)
             assertArrayEquals(plaintext, dest.readBytes())
         } finally {
             dest.delete()
+            part.delete()
         }
     }
 }

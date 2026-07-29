@@ -95,6 +95,11 @@ dependencies {
     // the gift wrap tests run without a device.
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Serves Blossom chunks to the download/resume tests. In testImplementation
+    // rather than androidTestImplementation because BlossomService is free of
+    // android.* APIs, so its tests run on the JVM — and therefore in CI, which
+    // only runs testDebugUnitTest.
+    testImplementation(libs.okhttp.mockwebserver)
 
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)

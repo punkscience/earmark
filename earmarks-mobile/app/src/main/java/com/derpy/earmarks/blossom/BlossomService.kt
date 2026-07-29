@@ -1,6 +1,5 @@
 package com.derpy.earmarks.blossom
 
-import android.util.Base64
 import com.derpy.earmarks.data.BlossomManifest
 import com.derpy.earmarks.data.Chunk
 import com.derpy.earmarks.data.Earmark
@@ -20,8 +19,20 @@ import org.bouncycastle.crypto.params.AEADParameters
 import org.bouncycastle.crypto.params.KeyParameter
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.Base64
 
+/**
+ * Blossom chunk transfer: download + SHA-256 verify + AES-256-GCM decrypt,
+ * plus BUD-01 delete and BUD-04 mirror.
+ *
+ * Deliberately free of `android.*` APIs — `java.util.Base64` rather than
+ * `android.util.Base64` — so the download and resume logic runs in JVM unit
+ * tests instead of needing a device, the same convention the NIP-44 and gift
+ * wrap code follows. Both encode standard padded base64, which is what the Go
+ * clients emit (`base64.StdEncoding` in `earmark-core/blossom.go`).
+ */
 class BlossomService(private val httpClient: OkHttpClient) {
 
     /**
@@ -42,13 +53,26 @@ class BlossomService(private val httpClient: OkHttpClient) {
     }
 
     /**
-     * Downloads, verifies, decrypts, and reassembles all chunks for [earmark],
-     * writing the result to [destFile]. Never throws on network/HTTP errors —
-     * returns a [DownloadResult] so the caller can decide orphan cleanup vs
-     * retry-later. (Decryption failures are still wrapped as [Unavailable].)
+     * Downloads, verifies, decrypts, and reassembles all chunks for [earmark].
+     *
+     * Chunks are appended to [partFile] and the completed file is moved to
+     * [destFile] only once every chunk has landed, so [destFile] is either
+     * absent or whole — never a stub that the cache would mistake for a
+     * playable track.
+     *
+     * **[partFile] survives failure on purpose.** A run interrupted by a lost
+     * network, a Doze freeze, or the process being reclaimed keeps every chunk
+     * it already verified, and the next run resumes from there. Only an
+     * [Orphaned] result discards it, because blobs that every server has
+     * 404'd can never complete. This is what makes an interruption cost the
+     * current chunk instead of the whole track.
+     *
+     * Never throws on network/HTTP errors — returns a [DownloadResult] so the
+     * caller can decide orphan cleanup vs retry-later. (Decryption failures are
+     * still wrapped as [Unavailable].)
      *
      * Streams one chunk at a time: download → decrypt → write → release. The
-     * previous implementation downloaded every chunk concurrently and then
+     * original implementation downloaded every chunk concurrently and then
      * reduce-concatenated them into a single ByteArray, which peaked at ~3×
      * the file size and OOM'd the 256MB heap for ~60MB earmarks. Sequential
      * streaming caps peak memory at roughly two chunks regardless of file
@@ -58,22 +82,46 @@ class BlossomService(private val httpClient: OkHttpClient) {
     suspend fun downloadAndDecrypt(
         earmark: Earmark,
         destFile: File,
+        partFile: File,
         privKeyHex: String
     ): DownloadResult =
         withContext(Dispatchers.IO) {
             val manifest = earmark.blossom
                 ?: return@withContext DownloadResult.Unavailable("No blossom manifest")
-            val keyBytes = Base64.decode(manifest.key, Base64.DEFAULT)
+            val keyBytes = try {
+                Base64.getDecoder().decode(manifest.key)
+            } catch (e: IllegalArgumentException) {
+                return@withContext DownloadResult.Unavailable("AES key is not valid base64")
+            }
             if (keyBytes.size != 32) {
                 return@withContext DownloadResult.Unavailable("AES key must be 32 bytes")
             }
 
             val orderedChunks = manifest.chunks.sortedBy { it.index }
+            if (orderedChunks.isEmpty()) {
+                return@withContext DownloadResult.Unavailable("Manifest has no chunks")
+            }
+            // The manifest is remote input and the resume offset is computed
+            // from it. A chunk too small to hold its own framing would make
+            // that arithmetic meaningless, so refuse rather than resume at a
+            // wrong offset and assemble a corrupt file.
+            if (orderedChunks.any { it.size <= CHUNK_OVERHEAD }) {
+                return@withContext DownloadResult.Unavailable("Manifest has a malformed chunk size")
+            }
 
             val result: DownloadResult = try {
-                FileOutputStream(destFile).use { out ->
-                    var terminal: DownloadResult? = null
-                    for (chunk in orderedChunks) {
+                partFile.parentFile?.mkdirs()
+                val resume = resumePoint(orderedChunks, partFile.length())
+                // Cut back any half-written tail. Off-boundary bytes are only
+                // possible when a process died mid-write; everything below the
+                // boundary was SHA-256 verified before it was appended.
+                if (partFile.length() != resume.truncateTo) {
+                    RandomAccessFile(partFile, "rw").use { it.setLength(resume.truncateTo) }
+                }
+
+                var terminal: DownloadResult? = null
+                FileOutputStream(partFile, /* append = */ true).use { out ->
+                    for (chunk in orderedChunks.drop(resume.nextChunk)) {
                         when (val r = downloadChunk(chunk, privKeyHex)) {
                             is ChunkFetchResult.AllNotFound -> {
                                 terminal = DownloadResult.Orphaned(chunk.sha256)
@@ -96,18 +144,49 @@ class BlossomService(private val httpClient: OkHttpClient) {
                             }
                         }
                     }
-                    terminal ?: DownloadResult.Success
                 }
+                terminal ?: DownloadResult.Success
             } catch (e: Exception) {
                 DownloadResult.Unavailable(e.message ?: e.javaClass.simpleName)
             }
 
-            // Any non-success path may have partially written destFile. Clear
-            // it so EarmarkCache.getCachedFile doesn't treat a stub as cached
-            // on next launch.
-            if (result !is DownloadResult.Success) destFile.delete()
-            result
+            when (result) {
+                is DownloadResult.Success -> publish(partFile, destFile, orderedChunks)
+                // Provably unfinishable — every server 404'd a chunk. Keeping
+                // the partial would just leak disk until the earmark is pruned.
+                is DownloadResult.Orphaned -> { partFile.delete(); result }
+                // Possibly transient: keep the bytes for the next attempt.
+                is DownloadResult.Unavailable -> result
+            }
         }
+
+    /**
+     * Moves a fully-downloaded [partFile] into place at [destFile].
+     *
+     * The length check is the safety net under the derived resume offset: if
+     * the assembled file ever disagrees with what the manifest says it should
+     * be, the arithmetic was wrong somewhere and the bytes are not the track we
+     * think they are. Throw them away and re-fetch rather than publish a file
+     * that would then look permanently cached.
+     */
+    private fun publish(partFile: File, destFile: File, chunks: List<Chunk>): DownloadResult {
+        val expected = expectedPlainLength(chunks)
+        if (partFile.length() != expected) {
+            partFile.delete()
+            return DownloadResult.Unavailable(
+                "Assembled ${partFile.length()} bytes, manifest says $expected"
+            )
+        }
+        destFile.parentFile?.mkdirs()
+        // renameTo will not replace an existing file on every filesystem, and a
+        // zero-length leftover reads as "not cached" so it can legitimately be
+        // sitting there.
+        destFile.delete()
+        if (!partFile.renameTo(destFile)) {
+            return DownloadResult.Unavailable("Could not move the completed download into the cache")
+        }
+        return DownloadResult.Success
+    }
 
     /**
      * Result of attempting to delete every blob in a manifest from every
@@ -239,7 +318,7 @@ class BlossomService(private val httpClient: OkHttpClient) {
             ),
             createdAt = now
         )
-        return Base64.encodeToString(event.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        return Base64.getEncoder().encodeToString(event.toString().toByteArray(Charsets.UTF_8))
     }
 
     private sealed class ChunkFetchResult {

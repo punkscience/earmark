@@ -256,9 +256,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (uncached.isNotEmpty()) {
                     for ((i, earmark) in uncached.withIndex()) {
                         _state.value = AppState.Downloading(i + 1, uncached.size)
-                        val destFile = cache.targetFile(earmark)
                         val result = try {
-                            blossomService.downloadAndDecrypt(earmark, destFile, privKeyHex)
+                            blossomService.downloadAndDecrypt(
+                                earmark,
+                                cache.targetFile(earmark),
+                                cache.partFile(earmark),
+                                privKeyHex
+                            )
                         } catch (e: Exception) {
                             BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
                         }
@@ -422,7 +426,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         for ((i, earmark) in uncached.withIndex()) {
             _state.value = AppState.Downloading(i + 1, uncached.size)
             try {
-                blossomService.downloadAndDecrypt(earmark, cache.targetFile(earmark), privKeyHex)
+                blossomService.downloadAndDecrypt(
+                    earmark,
+                    cache.targetFile(earmark),
+                    cache.partFile(earmark),
+                    privKeyHex
+                )
             } catch (_: Exception) {
             }
         }
