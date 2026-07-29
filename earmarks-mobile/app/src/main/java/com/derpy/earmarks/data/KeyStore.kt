@@ -9,7 +9,12 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "earmarks_prefs")
+/**
+ * The app's single preferences DataStore. Internal rather than private because
+ * [SettingsStore] shares it — two `preferencesDataStore` delegates with the
+ * same name in one process throws at runtime.
+ */
+internal val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "earmarks_prefs")
 
 private val PRIV_KEY_HEX = stringPreferencesKey("priv_key_hex")
 

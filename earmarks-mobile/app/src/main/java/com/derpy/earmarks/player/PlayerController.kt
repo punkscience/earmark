@@ -40,6 +40,19 @@ data class PlayerState(
 internal fun sameTrackSet(timelineIds: List<String>, newTs: List<Long>): Boolean =
     timelineIds.toSet() == newTs.map { it.toString() }.toSet()
 
+/**
+ * Where the currently-loaded track lands in a rebuilt playlist, or -1 when it
+ * is not in it.
+ *
+ * Handing this index and the current playback position back to the player is
+ * what lets the playlist grow — as background downloads complete — without
+ * interrupting what is already playing.
+ */
+internal fun resumeIndex(currentMediaId: String?, newTs: List<Long>): Int {
+    if (currentMediaId == null) return -1
+    return newTs.indexOfFirst { it.toString() == currentMediaId }
+}
+
 class PlayerController(private val context: Context) {
 
     private var controller: MediaController? = null
@@ -155,13 +168,15 @@ class PlayerController(private val context: Context) {
                 )
                 .build()
         }
-        // When the playing track survives into the new playlist, hand over
+        // When the loaded track survives into the new playlist, hand over
         // mid-note: same item, same position, playback never stops.
+        //
+        // Deliberately not conditioned on isPlaying. The playlist now grows
+        // underneath the user as background downloads land, and a paused
+        // listener is still a listener — restarting them at a random track
+        // because they happened to be between songs would be its own bug.
         val currentId = mc.currentMediaItem?.mediaId
-        val keepIdx =
-            if (mc.isPlaying && currentId != null)
-                shuffled.indexOfFirst { it.second.ts.toString() == currentId }
-            else -1
+        val keepIdx = resumeIndex(currentId, shuffled.map { it.second.ts })
         // Load the playlist ready to play but DON'T start automatically.
         // The user controls when playback begins via the play button — autoplay
         // was startling, especially when coming back to the app in the car.

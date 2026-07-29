@@ -23,10 +23,12 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,8 +38,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.derpy.earmarks.R
 import com.derpy.earmarks.player.PlayerState
 
 @Composable
@@ -47,6 +51,9 @@ fun PlayerScreen(
     stats: BlossomStats,
     notice: String?,
     channelState: ChannelUiState,
+    syncStatus: SyncStatus,
+    downloadOnMobileData: Boolean,
+    onSetDownloadOnMobileData: (Boolean) -> Unit,
     onDismissNotice: () -> Unit,
     onPlayPause: () -> Unit,
     onSkipNext: () -> Unit,
@@ -97,12 +104,34 @@ fun PlayerScreen(
         AlertDialog(
             onDismissRequest = { showSettings = false },
             title = { Text("Settings") },
-            text = { Text("Remove your stored Nostr key. You'll need to enter it again next time.") },
+            text = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(stringResource(R.string.settings_mobile_data_title))
+                            Text(
+                                stringResource(R.string.settings_mobile_data_summary),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = downloadOnMobileData,
+                            onCheckedChange = onSetDownloadOnMobileData
+                        )
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        "Remove your stored Nostr key. You'll need to enter it again next time.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            },
             confirmButton = {
                 TextButton(onClick = { onClearKey(); showSettings = false }) { Text("Remove key") }
             },
             dismissButton = {
-                TextButton(onClick = { showSettings = false }) { Text("Cancel") }
+                TextButton(onClick = { showSettings = false }) { Text("Close") }
             }
         )
     }
@@ -194,16 +223,6 @@ fun PlayerScreen(
                 Text(appState.message, style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            is AppState.Downloading -> {
-                CircularProgressIndicator(
-                    progress = { appState.done.toFloat() / appState.total },
-                    modifier = Modifier.size(48.dp)
-                )
-                Spacer(Modifier.height(16.dp))
-                Text("Downloading ${appState.done} / ${appState.total}",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
             is AppState.Playing -> {
                 if (playerState.title.isNotBlank()) {
                     Text(playerState.title,
@@ -230,12 +249,12 @@ fun PlayerScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline)
                 }
-                if (appState.unavailable > 0) {
+                if (appState.unavailable > 0 && !syncStatus.running) {
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "${appState.unavailable} earmark(s) unavailable — retry next launch",
+                        "${appState.unavailable} earmark(s) not downloaded yet",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.outline,
                         textAlign = TextAlign.Center
                     )
                 }
@@ -247,6 +266,24 @@ fun PlayerScreen(
                     textAlign = TextAlign.Center)
             }
             else -> {}
+        }
+
+        // Downloads no longer block playback: whatever is already cached plays
+        // while the rest arrives, and this is the only sign of it on screen.
+        if (syncStatus.running && syncStatus.total > 0) {
+            Spacer(Modifier.height(16.dp))
+            LinearProgressIndicator(
+                progress = { syncStatus.done.toFloat() / syncStatus.total },
+                modifier = Modifier.fillMaxWidth(0.7f)
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Fetching ${syncStatus.done} / ${syncStatus.total}" +
+                    if (syncStatus.title.isNotBlank()) " — ${syncStatus.title}" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center
+            )
         }
 
         Spacer(Modifier.weight(1f))

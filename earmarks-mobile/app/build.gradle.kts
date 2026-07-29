@@ -84,6 +84,11 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
 
+    // Background sync + downloads. Survives process death and reboot, applies
+    // network/battery constraints, and backs off on failure — all of which we
+    // would otherwise hand-roll around a bare foreground service.
+    implementation(libs.androidx.work.runtime.ktx)
+
     // Crypto: secp256k1 ECDH, HKDF-SHA256, ChaCha20 for NIP-44
     implementation(libs.bouncycastle)
 
@@ -95,6 +100,11 @@ dependencies {
     // the gift wrap tests run without a device.
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Serves Blossom chunks to the download/resume tests. In testImplementation
+    // rather than androidTestImplementation because BlossomService is free of
+    // android.* APIs, so its tests run on the JVM — and therefore in CI, which
+    // only runs testDebugUnitTest.
+    testImplementation(libs.okhttp.mockwebserver)
 
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
