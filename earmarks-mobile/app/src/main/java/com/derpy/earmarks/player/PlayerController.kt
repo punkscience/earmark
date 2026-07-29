@@ -32,6 +32,14 @@ data class PlayerState(
     val artworkData: ByteArray? = null
 )
 
+/**
+ * Whether the media IDs already loaded in the player's timeline are exactly the
+ * tracks in the incoming playlist. Order is irrelevant — the timeline keeps its
+ * own shuffle — only membership matters.
+ */
+internal fun sameTrackSet(timelineIds: List<String>, newTs: List<Long>): Boolean =
+    timelineIds.toSet() == newTs.map { it.toString() }.toSet()
+
 class PlayerController(private val context: Context) {
 
     private var controller: MediaController? = null
@@ -108,26 +116,25 @@ class PlayerController(private val context: Context) {
     fun setPlaylist(files: List<Pair<File, Earmark>>) {
         val mc = controller ?: return
 
-        // If we already have a populated timeline and the player is active (playing/ready/buffering),
-        // we can preserve the active session's playlist so we don't interrupt active background/Auto playback.
-        if (mc.mediaItemCount > 0 && (mc.isPlaying || mc.playbackState == Player.STATE_BUFFERING || mc.playbackState == Player.STATE_READY)) {
+        val timelineIds = (0 until mc.mediaItemCount).map { mc.getMediaItemAt(it).mediaId }
+        val active = mc.isPlaying ||
+            mc.playbackState == Player.STATE_BUFFERING ||
+            mc.playbackState == Player.STATE_READY
+
+        // An active session (background/Auto playback) already holding exactly
+        // this set of tracks keeps its playlist and order untouched. The set
+        // comparison is load-bearing: preserving on "active" alone froze the
+        // timeline at whatever partial playlist first reached READY, so tracks
+        // downloaded later never became playable until the process died.
+        if (active && timelineIds.isNotEmpty() && sameTrackSet(timelineIds, files.map { it.second.ts })) {
             shuffledEarmarks.clear()
-            val timeline = mc.currentTimeline
-            val window = Timeline.Window()
-            for (i in 0 until mc.mediaItemCount) {
-                val mediaItem = mc.getMediaItemAt(i)
-                val ts = mediaItem.mediaId.toLongOrNull()
-                val earmark = files.firstOrNull { it.second.ts == ts }?.second
-                if (earmark != null) {
-                    shuffledEarmarks.add(earmark)
-                }
+            for (id in timelineIds) {
+                val ts = id.toLongOrNull()
+                files.firstOrNull { it.second.ts == ts }?.let { shuffledEarmarks.add(it.second) }
             }
-            // If we successfully mapped the active session's playlist, sync our states and keep it running
-            if (shuffledEarmarks.size == mc.mediaItemCount) {
-                _state.value = _state.value.copy(totalTracks = shuffledEarmarks.size)
-                updateState()
-                return
-            }
+            _state.value = _state.value.copy(totalTracks = shuffledEarmarks.size)
+            updateState()
+            return
         }
 
         val shuffled = files.shuffled()
@@ -148,11 +155,19 @@ class PlayerController(private val context: Context) {
                 )
                 .build()
         }
+        // When the playing track survives into the new playlist, hand over
+        // mid-note: same item, same position, playback never stops.
+        val currentId = mc.currentMediaItem?.mediaId
+        val keepIdx =
+            if (mc.isPlaying && currentId != null)
+                shuffled.indexOfFirst { it.second.ts.toString() == currentId }
+            else -1
         // Load the playlist ready to play but DON'T start automatically.
         // The user controls when playback begins via the play button — autoplay
         // was startling, especially when coming back to the app in the car.
         mc.run {
-            setMediaItems(items)
+            if (keepIdx >= 0) setMediaItems(items, keepIdx, mc.currentPosition)
+            else setMediaItems(items)
             prepare()
         }
         _state.value = _state.value.copy(totalTracks = shuffled.size)

@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.derpy.earmarks.blossom.BlossomService
+import com.derpy.earmarks.data.ChannelCache
 import com.derpy.earmarks.data.ChannelInvite
 import com.derpy.earmarks.data.ChannelPost
 import com.derpy.earmarks.data.ChannelRepository
@@ -16,6 +17,7 @@ import com.derpy.earmarks.nostr.Bech32
 import com.derpy.earmarks.nostr.NostrService
 import com.derpy.earmarks.player.EarmarksMediaService
 import com.derpy.earmarks.player.PlayerController
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -115,6 +117,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val nostrService = NostrService(httpClient)
     private val blossomService = BlossomService(httpClient)
     private val pendingPrune = PendingPruneStore(app)
+    private val channelCache = ChannelCache(app)
     val cache = EarmarkCache(app)
     val player = PlayerController(app)
 
@@ -154,7 +157,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         player.connect { /* controller ready */ }
         EarmarksMediaService.onDeleteRequested = { deleteCurrent() }
+        restoreChannelSnapshot()
         load()
+    }
+
+    /**
+     * Renders the last synced channel state immediately, before any network.
+     * Without this, every cold start hides the chip row until a full relay
+     * round-trip completes — one slow relay stalls it for its whole timeout.
+     * The live sync that follows replaces the snapshot.
+     */
+    private fun restoreChannelSnapshot() {
+        viewModelScope.launch {
+            val cached = withContext(Dispatchers.IO) { channelCache.load() } ?: return@launch
+            // A live sync may already have landed; never clobber fresher data.
+            if (lastChannelSyncMs != 0L) return@launch
+            val now = System.currentTimeMillis() / 1000
+            _channelState.value = _channelState.value.copy(
+                channels = cached.state.channels,
+                invites = cached.state.invites,
+                postsByChannel = cached.posts.filterNot { it.expired(now) }.groupBy { it.chan }
+            )
+        }
     }
 
     fun load() {
@@ -353,6 +377,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     postsByChannel = sync.posts.groupBy { it.chan },
                     syncing = false
                 )
+                withContext(Dispatchers.IO) { channelCache.save(sync) }
             } catch (e: Exception) {
                 _channelState.value = _channelState.value.copy(syncing = false)
                 _notice.value = "Could not sync channels: ${e.message ?: "unknown error"}"
