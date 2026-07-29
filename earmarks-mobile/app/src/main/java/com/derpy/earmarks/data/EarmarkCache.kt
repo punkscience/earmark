@@ -65,23 +65,42 @@ class EarmarkCache(context: Context) {
         File(partDir, "earmark_${earmark.ts}${earmark.blossom!!.ext}.part")
 
     /**
-     * Drops cached audio and abandoned partial downloads for earmarks that have
-     * fallen off the published list. Partials are swept on the same rule as
-     * finished files — a download for a track you no longer hold is dead
-     * weight, and without this it would sit there until reinstall.
+     * Drops cached audio for earmarks that have fallen off the published list,
+     * and sweeps away abandoned partial downloads.
+     *
+     * Partials are pruned by age rather than by list membership. Membership is
+     * the wrong test for them: a partial is by definition a track that has not
+     * finished arriving, and the caller cannot always name every list it might
+     * belong to at the moment it prunes — sweeping on membership would delete a
+     * download in progress and hand back exactly the restart-from-nothing this
+     * cache exists to prevent. Age is unambiguous: nothing has appended to this
+     * file in [PART_MAX_AGE_DAYS] days, so nothing is going to.
      */
-    fun pruneExpired(activeTsList: Set<Long>) {
-        sweep(dir, activeTsList)
-        sweep(partDir, activeTsList)
-    }
-
-    private fun sweep(target: File, activeTsList: Set<Long>) {
-        target.listFiles()?.forEach { file ->
-            // Parse off the full name rather than nameWithoutExtension: a
-            // partial is "earmark_<ts>.mp3.part", whose nameWithoutExtension
-            // still carries the audio extension and would never parse.
-            val ts = file.name.removePrefix("earmark_").substringBefore('.').toLongOrNull()
+    fun pruneExpired(activeTsList: Set<Long>, nowMs: Long = System.currentTimeMillis()) {
+        dir.listFiles()?.forEach { file ->
+            val ts = parseTs(file)
             if (ts != null && ts !in activeTsList) file.delete()
         }
+        val cutoff = nowMs - PART_MAX_AGE_DAYS * 24 * 60 * 60 * 1000L
+        partDir.listFiles()?.forEach { file ->
+            if (file.lastModified() < cutoff) file.delete()
+        }
+    }
+
+    /**
+     * Reads the `ts` out of a cache filename. Parses the full name rather than
+     * `nameWithoutExtension` so that "earmark_<ts>.mp3.part" — whose
+     * `nameWithoutExtension` still carries the audio extension — resolves too.
+     */
+    private fun parseTs(file: File): Long? =
+        file.name.removePrefix("earmark_").substringBefore('.').toLongOrNull()
+
+    private companion object {
+        /**
+         * Long enough to outlast a phone that has been off Wi-Fi for a week,
+         * short enough that a genuinely dead download does not squat on disk
+         * until reinstall.
+         */
+        const val PART_MAX_AGE_DAYS = 14L
     }
 }

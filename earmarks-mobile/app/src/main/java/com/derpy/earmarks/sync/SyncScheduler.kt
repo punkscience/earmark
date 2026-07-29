@@ -25,9 +25,12 @@ import java.util.concurrent.TimeUnit
  *   be there when you next open the app. It waits for an unmetered connection
  *   unless you have said otherwise, and for the battery not to be low.
  *
- * Both share one unique work name, so a foreground request joins an in-flight
- * background run rather than racing it — two downloaders appending to the same
- * `.part` file would corrupt it.
+ * The two are separate WorkManager requests under separate names, and must be:
+ * sharing one name would make [ExistingWorkPolicy.KEEP] treat the always-
+ * scheduled periodic work as the incumbent and silently drop every [syncNow].
+ * They can therefore overlap, so the guarantee that only one sync touches the
+ * download staging area at a time lives in [EarmarkSyncer] itself rather than
+ * in the choice of work names.
  */
 object SyncScheduler {
 

@@ -45,6 +45,18 @@ class EarmarkSyncWorker(
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
 
+    /**
+     * Required for expedited work below API 31, where the platform has no
+     * expedited job concept and WorkManager instead runs the request as a
+     * foreground service — asking the worker for its notification *before*
+     * [doWork] is entered. [CoroutineWorker]'s default implementation throws,
+     * which WorkManager converts into an immediate failure, so without this
+     * override every foreground sync would fail on Android 8 through 11
+     * without ever running.
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo =
+        notification(context.getString(R.string.sync_notification_connecting))
+
     override suspend fun doWork(): Result {
         setForegroundSafely(notification(context.getString(R.string.sync_notification_connecting)))
 

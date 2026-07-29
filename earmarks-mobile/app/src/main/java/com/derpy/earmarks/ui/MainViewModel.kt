@@ -256,19 +256,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         if (playlist.isEmpty()) {
-            // Nothing playable yet. Until a sync has actually finished, that is
-            // "not yet" rather than "nothing" — on a fresh install there is no
-            // snapshot at all, and announcing an empty stash before the first
-            // sync has even started would be wrong every time. Once a run has
-            // completed, an empty stash is the real answer and worth saying,
-            // because for an invited account channels are how music arrives.
-            _state.value = if (syncCompletedOnce) {
-                AppState.Error(
+            // Nothing playable yet, which means one of three different things.
+            // On a fresh install there is no snapshot at all, so announcing an
+            // empty stash before the first sync has even started would be wrong
+            // every time. A sync that is scheduled but not running is waiting
+            // on its constraints — say so, rather than leaving a spinner that
+            // never resolves. Only once a run has actually finished is an empty
+            // stash the real answer, and then it is worth saying, because for
+            // an invited account channels are how music first arrives.
+            _state.value = when {
+                syncCompletedOnce -> AppState.Error(
                     "No earmarks in your stash yet. Channel invites and " +
                         "shared tracks still appear in the row above."
                 )
-            } else {
-                AppState.Loading("Checking for new tracks…")
+                _syncStatus.value.running -> AppState.Loading("Checking for new tracks…")
+                else -> AppState.Loading("Waiting for a connection…")
             }
             return
         }
@@ -304,11 +306,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     SyncStatus()
                 }
 
+                // A run that reached a terminal state counts as having looked,
+                // even if it never got as far as RUNNING — otherwise a sync
+                // that fails outright leaves the screen waiting forever.
+                if (infos.any { it.state.isFinished }) syncCompletedOnce = true
+
                 if (wasRunning && running == null) {
                     syncCompletedOnce = true
-                    showCachedTracks()
                     restoreChannelSnapshot(force = true)
                 }
+                // Refresh on every emission, not only at the end of a run:
+                // progress ticks between tracks, so each track that finishes
+                // downloading joins the playlist as it lands. setPlaylist keeps
+                // the loaded track and position, so this never interrupts what
+                // is already playing.
+                showCachedTracks()
                 wasRunning = running != null
             }
         }
@@ -378,55 +390,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun selectSource(source: PlayerSource) {
         viewModelScope.launch {
-            val privKeyHex = keyStore.getKey() ?: return@launch
             _channelState.value = _channelState.value.copy(source = source)
 
-            val earmarks = when (source) {
-                is PlayerSource.MyEarmarks -> currentEarmarks
-                is PlayerSource.Channel ->
-                    _channelState.value.postsFor(source.id).map { it.earmark }
+            if (source is PlayerSource.MyEarmarks) {
+                showCachedTracks()
+                SyncScheduler.syncNow(getApplication())
+                return@launch
             }
+
+            val chan = source as PlayerSource.Channel
+            val earmarks = _channelState.value.postsFor(chan.id).map { it.earmark }
             if (earmarks.isEmpty()) {
                 // An empty channel is correct, not broken — there is no
                 // backfill, so a channel you just joined has nothing in it.
                 _state.value = AppState.Error(
-                    if (source is PlayerSource.Channel)
-                        "Nothing posted to ${source.name} yet. Tracks shared from now on appear here."
-                    else "No earmarks found"
+                    "Nothing posted to ${chan.name} yet. Tracks shared from now on appear here."
                 )
                 return@launch
             }
-            playSource(privKeyHex, earmarks)
+            playSource(earmarks)
         }
     }
 
-    /** Downloads whatever is not cached, then hands the playlist to the player. */
-    private suspend fun playSource(privKeyHex: String, earmarks: List<Earmark>) {
-        val uncached = earmarks.filter { cache.getCachedFile(it) == null }
-        for ((i, earmark) in uncached.withIndex()) {
-            // Channel posts are fetched here rather than by the worker: you
-            // tapped a channel chip and are waiting on it. They still get the
-            // resumable `.part` staging, so backgrounding mid-fetch costs the
-            // current chunk and the next attempt carries on.
-            _syncStatus.value = SyncStatus(true, i + 1, uncached.size, earmark.title)
-            try {
-                blossomService.downloadAndDecrypt(
-                    earmark,
-                    cache.targetFile(earmark),
-                    cache.partFile(earmark),
-                    privKeyHex
-                )
-            } catch (_: Exception) {
-            }
-        }
-        _syncStatus.value = SyncStatus()
+    /**
+     * Hands the player whatever of [earmarks] is already on disk, and asks for
+     * a sync to fetch the rest.
+     *
+     * Deliberately does not download. The sync worker is the only downloader in
+     * the app, which is what guarantees that nothing else is appending to the
+     * same `.part` file — two writers would interleave chunks into a file of
+     * exactly the right length holding the wrong audio, which no length check
+     * can catch. It also means backgrounding mid-fetch keeps its progress,
+     * where a download started from here would not.
+     */
+    private suspend fun playSource(earmarks: List<Earmark>) {
         val playlist = earmarks.mapNotNull { e -> cache.getCachedFile(e)?.let { it to e } }
         if (playlist.isEmpty()) {
-            _state.value = AppState.Error("No playable tracks available")
-            return
+            _state.value = AppState.Loading("Fetching these tracks…")
+        } else {
+            player.setPlaylist(playlist)
+            _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
         }
-        player.setPlaylist(playlist)
-        _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
+        SyncScheduler.syncNow(getApplication())
     }
 
     /**

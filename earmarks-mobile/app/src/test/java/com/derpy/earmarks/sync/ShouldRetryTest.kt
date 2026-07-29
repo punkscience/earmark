@@ -26,6 +26,13 @@ class ShouldRetryTest {
     }
 
     @Test
+    fun `a run that lost the lock is not a failure`() {
+        // Another sync was already in flight and is doing this run's work for
+        // it. Retrying would just lose the race again.
+        assertFalse(shouldRetry(EarmarkSyncer.Outcome.AlreadyRunning))
+    }
+
+    @Test
     fun `no key stored is not a failure`() {
         // Before the first key is entered there is nothing to sync. Retrying
         // would back off a schedule that should simply run when a key appears.

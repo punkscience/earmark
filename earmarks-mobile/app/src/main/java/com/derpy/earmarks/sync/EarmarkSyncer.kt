@@ -12,6 +12,7 @@ import com.derpy.earmarks.data.PendingPruneStore
 import com.derpy.earmarks.net.Http
 import com.derpy.earmarks.nostr.NostrService
 import com.derpy.earmarks.nostr.publishWithRetry
+import kotlinx.coroutines.sync.Mutex
 
 /**
  * Brings local state in line with the relays and Blossom: fetch the earmark
@@ -53,6 +54,9 @@ class EarmarkSyncer(context: Context) {
         /** No key stored yet — nothing to sync, and not an error. */
         object NoKey : Outcome
 
+        /** Another sync already holds the lock. Not an error either. */
+        object AlreadyRunning : Outcome
+
         /**
          * @property downloaded tracks fetched this run.
          * @property unavailable tracks that failed for reasons that may be
@@ -69,63 +73,98 @@ class EarmarkSyncer(context: Context) {
      * Runs the full pipeline. Never throws for an individual track — a single
      * dead server must not strand the other eleven — but does propagate a
      * failure to reach the relays at all, which the worker turns into a retry.
+     *
+     * At most one sync runs at a time, process-wide. The scheduled pass and
+     * the run triggered by opening the app are separate WorkManager requests
+     * and can otherwise overlap, and two syncs appending to the same `.part`
+     * file would interleave chunks into a file that is the right length and
+     * the wrong audio — which the assembled-length check in
+     * [com.derpy.earmarks.blossom.BlossomService] cannot catch. A second
+     * caller returns immediately rather than queueing, because the run already
+     * in flight is doing its work for it.
      */
     suspend fun sync(onProgress: suspend (Progress) -> Unit = {}): Outcome {
+        if (!syncLock.tryLock()) return Outcome.AlreadyRunning
+        try {
+            return syncLocked(onProgress)
+        } finally {
+            syncLock.unlock()
+        }
+    }
+
+    private suspend fun syncLocked(onProgress: suspend (Progress) -> Unit): Outcome {
         val privKeyHex = keyStore.getKey() ?: return Outcome.NoKey
 
         onProgress(Progress.Connecting)
         var earmarks = nostrService.fetchEarmarks(privKeyHex)
         earmarks = reconcilePendingPrunes(privKeyHex, earmarks)
 
+        // Channels are independent of the personal stash: an invited account
+        // starts empty and channels are how music first arrives for it, so this
+        // runs even when the stash has nothing in it.
+        onProgress(Progress.Channels)
+        val channelPosts = try {
+            val sync = channelRepo.sync(privKeyHex)
+            channelCache.save(sync)
+            sync.posts.map { it.earmark }
+        } catch (_: Exception) {
+            // A relay hiccup on channels must not fail a run that still has
+            // music to fetch. The next pass picks them up.
+            emptyList()
+        }
+
+        if (earmarks.isNotEmpty()) {
+            cache.pruneExpired(earmarks.map { it.ts }.toSet() + channelPosts.map { it.ts })
+        }
+
+        // Personal earmarks first — your own stash is what the player falls
+        // back to — then whatever has been shared with you. Both are fetched
+        // here so that "open the app and the new tracks are there" holds for
+        // music other people sent as well as your own.
+        val wanted = (earmarks + channelPosts).filter { cache.getCachedFile(it) == null }
+        val orphanedTs = mutableListOf<Long>()
         var downloaded = 0
         var unavailable = 0
 
-        if (earmarks.isNotEmpty()) {
-            cache.pruneExpired(earmarks.map { it.ts }.toSet())
-
-            val uncached = earmarks.filter { cache.getCachedFile(it) == null }
-            val orphanedTs = mutableListOf<Long>()
-
-            for ((i, earmark) in uncached.withIndex()) {
-                onProgress(Progress.Downloading(i + 1, uncached.size, earmark.title))
-                val result = try {
-                    blossomService.downloadAndDecrypt(
-                        earmark,
-                        cache.targetFile(earmark),
-                        cache.partFile(earmark),
-                        privKeyHex
-                    )
-                } catch (e: Exception) {
-                    BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
-                }
-                when (result) {
-                    is BlossomService.DownloadResult.Success -> downloaded++
-                    is BlossomService.DownloadResult.Orphaned -> orphanedTs += earmark.ts
-                    is BlossomService.DownloadResult.Unavailable -> unavailable++
-                }
+        for ((i, earmark) in wanted.withIndex()) {
+            onProgress(Progress.Downloading(i + 1, wanted.size, earmark.title))
+            val result = try {
+                blossomService.downloadAndDecrypt(
+                    earmark,
+                    cache.targetFile(earmark),
+                    cache.partFile(earmark),
+                    privKeyHex
+                )
+            } catch (e: Exception) {
+                BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
             }
-
-            if (orphanedTs.isNotEmpty()) {
-                cleanupOrphans(privKeyHex, earmarks, orphanedTs)
-                earmarks = earmarks.filterNot { it.ts in orphanedTs }
+            when (result) {
+                is BlossomService.DownloadResult.Success -> downloaded++
+                // Only the personal list can be republished to drop an orphan.
+                // A channel post that has gone is the sender's business.
+                is BlossomService.DownloadResult.Orphaned ->
+                    if (earmarks.any { it.ts == earmark.ts }) orphanedTs += earmark.ts
+                is BlossomService.DownloadResult.Unavailable -> unavailable++
             }
-
-            store.save(earmarks)
         }
 
-        // Channels are independent of the personal stash: an invited account
-        // starts empty and channels are how music first arrives for it, so this
-        // runs even when there was nothing to download.
-        onProgress(Progress.Channels)
-        try {
-            val sync = channelRepo.sync(privKeyHex)
-            channelCache.save(sync)
-        } catch (_: Exception) {
-            // A relay hiccup on channels must not fail a run that already
-            // downloaded music. The next pass picks them up.
+        if (orphanedTs.isNotEmpty()) {
+            cleanupOrphans(privKeyHex, earmarks, orphanedTs)
+            earmarks = earmarks.filterNot { it.ts in orphanedTs }
         }
+
+        if (earmarks.isNotEmpty()) store.save(earmarks)
 
         return Outcome.Synced(earmarks, downloaded, unavailable)
+    }
+
+    private companion object {
+        /**
+         * Serialises syncs across every trigger. All workers share one process,
+         * so a process-wide lock is enough to keep two of them off the same
+         * `.part` file.
+         */
+        val syncLock = Mutex()
     }
 
     /**
