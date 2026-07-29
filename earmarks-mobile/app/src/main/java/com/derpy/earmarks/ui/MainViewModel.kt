@@ -115,6 +115,32 @@ internal fun canSyncChannels(state: AppState): Boolean =
     state is AppState.Playing || state is AppState.Error
 
 /**
+ * The earmarks a source draws its playlist from.
+ *
+ * The one place the two stashes are told apart. Sources never merge: the
+ * personal list yields only what you published, a channel yields only what was
+ * posted to that channel, and a channel with no posts yields nothing rather
+ * than falling back to anything.
+ */
+internal fun earmarksForSource(
+    source: PlayerSource,
+    personal: List<Earmark>,
+    postsByChannel: Map<String, List<ChannelPost>>
+): List<Earmark> = when (source) {
+    is PlayerSource.MyEarmarks -> personal
+    is PlayerSource.Channel -> postsByChannel[source.id]?.map { it.earmark } ?: emptyList()
+}
+
+/**
+ * Whether deleting is meaningful for what [source] is playing.
+ *
+ * Only your own stash. A channel track belongs to whoever posted it: deleting
+ * one would republish your list from a playlist that was never yours and sweep
+ * another member's blobs off Blossom.
+ */
+internal fun canDeleteFrom(source: PlayerSource): Boolean = source is PlayerSource.MyEarmarks
+
+/**
  * Where an adopted track is mirrored to. Matches the Go clients' built-in
  * defaults; kind-10063 discovery is a desktop concern for now, so the phone
  * mirrors to the same primary the CLI uploads to.
@@ -212,6 +238,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 invites = cached.state.invites,
                 postsByChannel = cached.posts.filterNot { it.expired(now) }.groupBy { it.chan }
             )
+            // Posts the snapshot brought back are playlist input for whichever
+            // channel is selected.
+            refreshPlaylist()
         }
     }
 
@@ -230,53 +259,88 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = AppState.KeyMissing
                 return@launch
             }
-            showCachedTracks()
+            refreshPlaylist()
             SyncScheduler.syncNow(getApplication())
         }
     }
 
     /**
-     * Renders whatever is cached, immediately. Called at launch and again each
-     * time a sync finishes, so tracks appear as they land rather than after the
-     * whole batch.
+     * Rebuilds the playlist for whichever source is selected, from what is
+     * already on disk. Called at launch, on every sync emission, on every
+     * channel sync and whenever the chip changes, so tracks appear as they land
+     * rather than after the whole batch.
      *
-     * Skipped while a channel feed is selected — that playlist is built from
-     * channel posts by [selectSource], and rebuilding it from the personal
-     * stash would silently switch what you are listening to.
+     * The single writer of the player's playlist, deliberately. It used to be
+     * two — the personal stash here and channel feeds in [selectSource] — with
+     * this one guarded by an early return on the selected source. That guard
+     * was read before the snapshot was loaded off disk and never re-read after,
+     * so a sync tick that began while the personal stash was selected could
+     * finish after the user had tapped a channel chip and quietly replace that
+     * channel's playlist with the personal one. Flipping between chips during a
+     * sync hit it repeatedly.
      */
-    private suspend fun showCachedTracks() {
-        if (_channelState.value.source !is PlayerSource.MyEarmarks) return
+    private suspend fun refreshPlaylist() {
+        val source = _channelState.value.source
+        val personal = withContext(Dispatchers.IO) { store.load() }
 
-        val earmarks = withContext(Dispatchers.IO) { store.load() }
-        currentEarmarks = earmarks
+        // Both always describe the personal stash whatever is playing: the
+        // storage panel measures your own Blossom usage, and [keepPost]
+        // appends to your own list.
+        currentEarmarks = personal
         recomputeStats()
 
+        // The chip can change while the snapshot is read. Whichever source was
+        // tapped last owns the playlist; this run's result is stale.
+        if (_channelState.value.source != source) return
+
+        val earmarks = earmarksForSource(source, personal, _channelState.value.postsByChannel)
         val playlist = earmarks.mapNotNull { earmark ->
             cache.getCachedFile(earmark)?.let { it to earmark }
         }
 
         if (playlist.isEmpty()) {
-            // Nothing playable yet, which means one of three different things.
-            // On a fresh install there is no snapshot at all, so announcing an
-            // empty stash before the first sync has even started would be wrong
-            // every time. A sync that is scheduled but not running is waiting
-            // on its constraints — say so, rather than leaving a spinner that
-            // never resolves. Only once a run has actually finished is an empty
-            // stash the real answer, and then it is worth saying, because for
-            // an invited account channels are how music first arrives.
-            _state.value = when {
-                syncCompletedOnce -> AppState.Error(
-                    "No earmarks in your stash yet. Channel invites and " +
-                        "shared tracks still appear in the row above."
-                )
-                _syncStatus.value.running -> AppState.Loading("Checking for new tracks…")
-                else -> AppState.Loading("Waiting for a connection…")
-            }
+            // Nothing of this source is playable, so the player must not keep
+            // holding the last one's tracks — the chip would name a source and
+            // the speaker would play another.
+            player.clearPlaylist()
+            _state.value = emptyStateFor(source)
             return
         }
 
         player.setPlaylist(playlist)
         _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
+    }
+
+    /**
+     * What to say when the selected source has nothing playable on disk.
+     *
+     * For the personal stash this means one of three different things. On a
+     * fresh install there is no snapshot at all, so announcing an empty stash
+     * before the first sync has even started would be wrong every time. A sync
+     * that is scheduled but not running is waiting on its constraints — say so,
+     * rather than leaving a spinner that never resolves. Only once a run has
+     * actually finished is an empty stash the real answer, and then it is worth
+     * saying, because for an invited account channels are how music first
+     * arrives.
+     *
+     * For a channel there are two: an empty channel is correct, not broken —
+     * there is no backfill, so a channel you just joined has nothing in it —
+     * and a channel with posts whose audio has not landed yet is downloading.
+     */
+    private fun emptyStateFor(source: PlayerSource): AppState = when (source) {
+        is PlayerSource.MyEarmarks -> when {
+            syncCompletedOnce -> AppState.Error(
+                "No earmarks in your stash yet. Channel invites and " +
+                    "shared tracks still appear in the row above."
+            )
+            _syncStatus.value.running -> AppState.Loading("Checking for new tracks…")
+            else -> AppState.Loading("Waiting for a connection…")
+        }
+        is PlayerSource.Channel ->
+            if (_channelState.value.postsFor(source.id).isEmpty()) AppState.Error(
+                "Nothing posted to ${source.name} yet. " +
+                    "Tracks shared from now on appear here."
+            ) else AppState.Loading("Fetching these tracks…")
     }
 
     /**
@@ -320,7 +384,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // downloading joins the playlist as it lands. setPlaylist keeps
                 // the loaded track and position, so this never interrupts what
                 // is already playing.
-                showCachedTracks()
+                refreshPlaylist()
                 wasRunning = running != null
             }
         }
@@ -357,8 +421,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Pulls channel messages, applies roster changes, and refreshes the feed.
      *
-     * Deliberately never touches [_state]: a relay hiccup while syncing
-     * channels must not take the player down. Failures land in [_notice].
+     * A relay hiccup while syncing channels must not take the player down, so
+     * the failure path deliberately never touches [_state] — it lands in
+     * [_notice] instead. The success path does, through [refreshPlaylist],
+     * because posts that just arrived are what a selected channel plays.
      */
     fun syncChannels() {
         viewModelScope.launch {
@@ -374,6 +440,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     syncing = false
                 )
                 withContext(Dispatchers.IO) { channelCache.save(sync) }
+                // New posts are playlist input for whichever channel is
+                // selected; without this they wait for the next chip tap.
+                refreshPlaylist()
             } catch (e: Exception) {
                 _channelState.value = _channelState.value.copy(syncing = false)
                 _notice.value = "Could not sync channels: ${e.message ?: "unknown error"}"
@@ -387,34 +456,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Channel tracks are downloaded and decrypted the same way personal ones
      * are — the file key travels inside the post, so from here on there is no
      * difference between a track you uploaded and one someone sent you.
-     */
-    fun selectSource(source: PlayerSource) {
-        viewModelScope.launch {
-            _channelState.value = _channelState.value.copy(source = source)
-
-            if (source is PlayerSource.MyEarmarks) {
-                showCachedTracks()
-                SyncScheduler.syncNow(getApplication())
-                return@launch
-            }
-
-            val chan = source as PlayerSource.Channel
-            val earmarks = _channelState.value.postsFor(chan.id).map { it.earmark }
-            if (earmarks.isEmpty()) {
-                // An empty channel is correct, not broken — there is no
-                // backfill, so a channel you just joined has nothing in it.
-                _state.value = AppState.Error(
-                    "Nothing posted to ${chan.name} yet. Tracks shared from now on appear here."
-                )
-                return@launch
-            }
-            playSource(earmarks)
-        }
-    }
-
-    /**
-     * Hands the player whatever of [earmarks] is already on disk, and asks for
-     * a sync to fetch the rest.
      *
      * Deliberately does not download. The sync worker is the only downloader in
      * the app, which is what guarantees that nothing else is appending to the
@@ -423,15 +464,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * can catch. It also means backgrounding mid-fetch keeps its progress,
      * where a download started from here would not.
      */
-    private suspend fun playSource(earmarks: List<Earmark>) {
-        val playlist = earmarks.mapNotNull { e -> cache.getCachedFile(e)?.let { it to e } }
-        if (playlist.isEmpty()) {
-            _state.value = AppState.Loading("Fetching these tracks…")
-        } else {
-            player.setPlaylist(playlist)
-            _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
+    fun selectSource(source: PlayerSource) {
+        viewModelScope.launch {
+            _channelState.value = _channelState.value.copy(source = source)
+            refreshPlaylist()
+            SyncScheduler.syncNow(getApplication())
         }
-        SyncScheduler.syncNow(getApplication())
     }
 
     /**
@@ -585,6 +623,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun deleteCurrent() {
         val earmark = player.currentEarmark() ?: return
+
+        // Deleting from a channel feed would republish the personal list from a
+        // playlist that was never in it and sweep the poster's blobs off
+        // Blossom. The UI disables the button; Android Auto's custom action
+        // routes here too, so the guard lives at the source.
+        if (!canDeleteFrom(_channelState.value.source)) {
+            _notice.value = "Delete only works on your own earmarks. " +
+                "Switch to My Earmarks first."
+            return
+        }
 
         // ---- Immediate, synchronous UI update. ----
         player.removeCurrentItem()
