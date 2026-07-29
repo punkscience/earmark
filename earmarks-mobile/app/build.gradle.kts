@@ -84,6 +84,11 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
 
+    // Background sync + downloads. Survives process death and reboot, applies
+    // network/battery constraints, and backs off on failure — all of which we
+    // would otherwise hand-roll around a bare foreground service.
+    implementation(libs.androidx.work.runtime.ktx)
+
     // Crypto: secp256k1 ECDH, HKDF-SHA256, ChaCha20 for NIP-44
     implementation(libs.bouncycastle)
 

@@ -22,6 +22,7 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 
 /**
  * Blossom chunk transfer: download + SHA-256 verify + AES-256-GCM decrypt,
@@ -34,6 +35,22 @@ import java.util.Base64
  * clients emit (`base64.StdEncoding` in `earmark-core/blossom.go`).
  */
 class BlossomService(private val httpClient: OkHttpClient) {
+
+    /**
+     * Used for chunk fetches only. `readTimeout` bounds the gap between bytes,
+     * not the transfer, so a server dribbling data just under that threshold
+     * could hold a download — and the foreground service behind it — open
+     * indefinitely. `callTimeout` bounds the whole fetch instead, generously
+     * enough for 16 MiB over slow mobile.
+     *
+     * Scoped here rather than on the shared client because that client also
+     * carries the Nostr relay WebSockets, where a whole-call deadline is the
+     * wrong idea entirely. `newBuilder` shares the connection pool and
+     * dispatcher, so this costs nothing.
+     */
+    private val downloadClient: OkHttpClient by lazy {
+        httpClient.newBuilder().callTimeout(5, TimeUnit.MINUTES).build()
+    }
 
     /**
      * Outcome of attempting to download + decrypt a single earmark.
@@ -350,7 +367,7 @@ class BlossomService(private val httpClient: OkHttpClient) {
                     .url(url)
                     .header("Authorization", "Nostr $token")
                     .build()
-                httpClient.newCall(request).execute().use { response ->
+                downloadClient.newCall(request).execute().use { response ->
                     when {
                         response.isSuccessful -> {
                             val bytes = response.body?.bytes()

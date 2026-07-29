@@ -3,47 +3,66 @@ package com.derpy.earmarks.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
 import com.derpy.earmarks.blossom.BlossomService
 import com.derpy.earmarks.data.ChannelCache
 import com.derpy.earmarks.data.ChannelInvite
 import com.derpy.earmarks.data.ChannelPost
 import com.derpy.earmarks.data.ChannelRepository
 import com.derpy.earmarks.data.Earmark
-import com.derpy.earmarks.data.earmarksToJson
 import com.derpy.earmarks.data.EarmarkCache
+import com.derpy.earmarks.data.EarmarkStore
 import com.derpy.earmarks.data.KeyStore
 import com.derpy.earmarks.data.PendingPruneStore
+import com.derpy.earmarks.data.SettingsStore
+import com.derpy.earmarks.net.Http
 import com.derpy.earmarks.nostr.Bech32
 import com.derpy.earmarks.nostr.NostrService
+import com.derpy.earmarks.nostr.publishWithRetry
 import com.derpy.earmarks.player.EarmarksMediaService
 import com.derpy.earmarks.player.PlayerController
+import com.derpy.earmarks.sync.EarmarkSyncWorker
+import com.derpy.earmarks.sync.SyncScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import java.io.File
-import java.util.concurrent.TimeUnit
 
 sealed interface AppState {
     object KeyMissing : AppState
     data class Loading(val message: String) : AppState
-    data class Downloading(val done: Int, val total: Int) : AppState
     /**
-     * [unavailable] is the number of earmarks whose download failed this
-     * session for transient reasons (network, 5xx, SHA mismatch). They're
-     * still in the published list; we just couldn't play them right now.
-     * Orphaned earmarks (definitively gone from Blossom) are pruned silently
-     * and do not contribute to this count.
+     * [unavailable] is the number of earmarks in the list that have no playable
+     * file on disk yet — still downloading, or failed for transient reasons
+     * (network, 5xx, SHA mismatch). They're still in the published list; we
+     * just can't play them right now. Orphaned earmarks (definitively gone from
+     * Blossom) are pruned silently and do not contribute to this count.
      */
     data class Playing(val earmarks: List<Earmark>, val unavailable: Int = 0) : AppState
     data class Error(val message: String) : AppState
 }
+
+/**
+ * Progress of the background sync, for the non-blocking banner.
+ *
+ * Deliberately separate from [AppState]: downloading used to be a page-level
+ * state that hid the player until every track had landed, so a twelve-track
+ * sync meant twelve tracks of silence. Now whatever is already cached plays
+ * immediately and this reports what is still arriving.
+ */
+data class SyncStatus(
+    val running: Boolean = false,
+    val done: Int = 0,
+    val total: Int = 0,
+    val title: String = ""
+)
 
 /**
  * What the player is currently drawing its playlist from. Channels do not merge
@@ -89,9 +108,8 @@ internal fun shouldResyncChannels(lastSyncMs: Long, nowMs: Long): Boolean =
 
 /**
  * App states a foreground channel re-sync may run in: the player is up, or
- * startup settled on an error screen. Never mid-startup — Loading and
- * Downloading run their own sync when they finish — and never before a key
- * exists.
+ * startup settled on an error screen. Never mid-startup — Loading runs its own
+ * sync when it finishes — and never before a key exists.
  */
 internal fun canSyncChannels(state: AppState): Boolean =
     state is AppState.Playing || state is AppState.Error
@@ -108,21 +126,34 @@ private val MY_BLOSSOM_SERVERS = listOf(
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
-
     private val keyStore = KeyStore(app)
-    private val nostrService = NostrService(httpClient)
-    private val blossomService = BlossomService(httpClient)
+    private val nostrService = NostrService(Http.client)
+    private val blossomService = BlossomService(Http.client)
     private val pendingPrune = PendingPruneStore(app)
     private val channelCache = ChannelCache(app)
+    private val store = EarmarkStore(app)
+    private val settings = SettingsStore(app)
     val cache = EarmarkCache(app)
     val player = PlayerController(app)
 
     private val _state = MutableStateFlow<AppState>(AppState.Loading("Starting…"))
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    private val _syncStatus = MutableStateFlow(SyncStatus())
+    val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+
+    /** Whether background downloads may run on a metered connection. */
+    val downloadOnMobileData: StateFlow<Boolean> = settings.downloadOnMobileData
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun setDownloadOnMobileData(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setDownloadOnMobileData(enabled)
+            // Re-register so the periodic pass picks up the new network
+            // constraint instead of waiting for the next reinstall.
+            SyncScheduler.ensurePeriodicSync(getApplication())
+        }
+    }
 
     private val _stats = MutableStateFlow(BlossomStats(0, 0, 0))
     val stats: StateFlow<BlossomStats> = _stats.asStateFlow()
@@ -158,6 +189,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         player.connect { /* controller ready */ }
         EarmarksMediaService.onDeleteRequested = { deleteCurrent() }
         restoreChannelSnapshot()
+        observeSync()
         load()
     }
 
@@ -167,11 +199,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * round-trip completes — one slow relay stalls it for its whole timeout.
      * The live sync that follows replaces the snapshot.
      */
-    private fun restoreChannelSnapshot() {
+    private fun restoreChannelSnapshot(force: Boolean = false) {
         viewModelScope.launch {
             val cached = withContext(Dispatchers.IO) { channelCache.load() } ?: return@launch
             // A live sync may already have landed; never clobber fresher data.
-            if (lastChannelSyncMs != 0L) return@launch
+            // [force] is for the background worker's snapshot, which by
+            // definition is the freshest thing there is.
+            if (!force && lastChannelSyncMs != 0L) return@launch
             val now = System.currentTimeMillis() / 1000
             _channelState.value = _channelState.value.copy(
                 channels = cached.state.channels,
@@ -181,155 +215,101 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Brings the screen up from what is already on disk, then asks for a sync.
+     *
+     * No network happens here any more. The relay fetch and the downloads live
+     * in [EarmarkSyncWorker], which survives the app being backgrounded — the
+     * whole point of the exercise. This method's job is to get sound out of the
+     * speaker as fast as possible from the last snapshot, and then let the
+     * worker's results arrive underneath it through [observeSync].
+     */
     fun load() {
         viewModelScope.launch {
-            try {
-                _state.value = AppState.Loading("Loading…")
+            if (keyStore.getKey() == null) {
+                _state.value = AppState.KeyMissing
+                return@launch
+            }
+            showCachedTracks()
+            SyncScheduler.syncNow(getApplication())
+        }
+    }
 
-                val privKeyHex = keyStore.getKey()
-                if (privKeyHex == null) {
-                    _state.value = AppState.KeyMissing
-                    return@launch
-                }
+    /**
+     * Renders whatever is cached, immediately. Called at launch and again each
+     * time a sync finishes, so tracks appear as they land rather than after the
+     * whole batch.
+     *
+     * Skipped while a channel feed is selected — that playlist is built from
+     * channel posts by [selectSource], and rebuilding it from the personal
+     * stash would silently switch what you are listening to.
+     */
+    private suspend fun showCachedTracks() {
+        if (_channelState.value.source !is PlayerSource.MyEarmarks) return
 
-                _state.value = AppState.Loading("Connecting to Nostr relays…")
-                var earmarks = nostrService.fetchEarmarks(privKeyHex)
+        val earmarks = withContext(Dispatchers.IO) { store.load() }
+        currentEarmarks = earmarks
+        recomputeStats()
 
-                // Reconcile any prior delete that crashed/cancelled between
-                // blob deletion and Nostr publish. If the fetched list still
-                // contains a `ts` we've recorded as pruned, the blobs are
-                // already gone — republish the list without those entries
-                // before we hand it to the player.
-                val pending = pendingPrune.load()
-                if (pending.isNotEmpty()) {
-                    val stillPresent = earmarks.filter { it.ts in pending }.map { it.ts }
-                    if (stillPresent.isNotEmpty()) {
-                        _state.value = AppState.Loading(
-                            "Reconciling ${stillPresent.size} pending deletion(s)…"
-                        )
-                        val pruned = earmarks.filterNot { it.ts in pending }
-                        val acks = publishWithRetry(privKeyHex, pruned)
-                        if (acks > 0) {
-                            earmarks = pruned
-                            pendingPrune.removeAll(stillPresent)
-                        }
-                        // If still 0 acks we leave the sentinel intact and
-                        // proceed with the (broken) list — playback of those
-                        // tracks will fail but the next launch will retry.
-                    } else {
-                        // The pruned entries are no longer in the published
-                        // list (e.g. another client republished). Sentinel
-                        // is stale; clear it.
-                        pendingPrune.removeAll(pending)
-                    }
-                }
+        val playlist = earmarks.mapNotNull { earmark ->
+            cache.getCachedFile(earmark)?.let { it to earmark }
+        }
 
-                if (earmarks.isEmpty()) {
-                    _state.value = AppState.Error(
-                        "No earmarks in your stash yet. Channel invites and " +
-                            "shared tracks still appear in the row above."
+        if (playlist.isEmpty()) {
+            // Nothing playable yet. Until a sync has actually finished, that is
+            // "not yet" rather than "nothing" — on a fresh install there is no
+            // snapshot at all, and announcing an empty stash before the first
+            // sync has even started would be wrong every time. Once a run has
+            // completed, an empty stash is the real answer and worth saying,
+            // because for an invited account channels are how music arrives.
+            _state.value = if (syncCompletedOnce) {
+                AppState.Error(
+                    "No earmarks in your stash yet. Channel invites and " +
+                        "shared tracks still appear in the row above."
+                )
+            } else {
+                AppState.Loading("Checking for new tracks…")
+            }
+            return
+        }
+
+        player.setPlaylist(playlist)
+        _state.value = AppState.Playing(earmarks, earmarks.size - playlist.size)
+    }
+
+    /**
+     * Mirrors the background sync into [syncStatus], and refreshes the playlist
+     * whenever a run finishes so newly downloaded tracks become playable
+     * without reopening the app.
+     */
+    /**
+     * Whether a sync has finished at least once since launch. Guards the
+     * difference between "your stash is empty" and "we haven't looked yet".
+     */
+    private var syncCompletedOnce = false
+
+    private fun observeSync() {
+        viewModelScope.launch {
+            var wasRunning = false
+            SyncScheduler.syncState(getApplication()).collect { infos ->
+                val running = infos.firstOrNull { it.state == WorkInfo.State.RUNNING }
+                _syncStatus.value = if (running != null) {
+                    SyncStatus(
+                        running = true,
+                        done = running.progress.getInt(EarmarkSyncWorker.KEY_DONE, 0),
+                        total = running.progress.getInt(EarmarkSyncWorker.KEY_TOTAL, 0),
+                        title = running.progress.getString(EarmarkSyncWorker.KEY_TITLE) ?: ""
                     )
-                    // An invited account starts with an empty stash — channels
-                    // are how music first arrives. Bailing without this sync
-                    // would leave a pending invite invisible forever.
-                    syncChannels()
-                    return@launch
+                } else {
+                    SyncStatus()
                 }
 
-                // Update stats as soon as we have the list — even if the download
-                // loop below fails for some tracks, the storage panel should
-                // reflect the actual list rather than reading "0 earmarks".
-                currentEarmarks = earmarks
-                recomputeStats()
-
-                // Prune files for earmarks that are no longer in the list
-                cache.pruneExpired(earmarks.map { it.ts }.toSet())
-
-                // Download any earmarks not already cached. Each failure is
-                // bucketed into orphans (every server 404'd a chunk → definitively
-                // gone) or transient (network/5xx/SHA mismatch → retry later).
-                // The loop never aborts on a single failure.
-                val uncached = earmarks.filter { cache.getCachedFile(it) == null }
-                val orphanedTs = mutableListOf<Long>()
-                var unavailableCount = 0
-
-                if (uncached.isNotEmpty()) {
-                    for ((i, earmark) in uncached.withIndex()) {
-                        _state.value = AppState.Downloading(i + 1, uncached.size)
-                        val result = try {
-                            blossomService.downloadAndDecrypt(
-                                earmark,
-                                cache.targetFile(earmark),
-                                cache.partFile(earmark),
-                                privKeyHex
-                            )
-                        } catch (e: Exception) {
-                            BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
-                        }
-                        when (result) {
-                            is BlossomService.DownloadResult.Success -> {}
-                            is BlossomService.DownloadResult.Orphaned -> orphanedTs += earmark.ts
-                            is BlossomService.DownloadResult.Unavailable -> unavailableCount++
-                        }
-                    }
+                if (wasRunning && running == null) {
+                    syncCompletedOnce = true
+                    showCachedTracks()
+                    restoreChannelSnapshot(force = true)
                 }
-
-                // Orphan cleanup: blobs are verified gone (404 from every server
-                // on at least one chunk). Delete any surviving chunks from other
-                // servers (good citizen) and republish the list without these
-                // entries. Protected by the same sentinel contract as
-                // deleteCurrent so a crash mid-cleanup is recoverable.
-                if (orphanedTs.isNotEmpty()) {
-                    _state.value = AppState.Loading(
-                        "Cleaning up ${orphanedTs.size} orphaned earmark(s)…"
-                    )
-                    cleanupOrphans(privKeyHex, earmarks, orphanedTs)
-                    earmarks = earmarks.filterNot { it.ts in orphanedTs }
-                    currentEarmarks = earmarks
-                    recomputeStats()
-                }
-
-                // Build playlist from all cached files (shuffle happens inside PlayerController)
-                val playlist = earmarks.mapNotNull { earmark ->
-                    cache.getCachedFile(earmark)?.let { it to earmark }
-                }
-
-                if (playlist.isEmpty()) {
-                    _state.value = AppState.Error(
-                        if (unavailableCount > 0)
-                            "$unavailableCount earmark(s) couldn't be fetched — try again later."
-                        else "No playable tracks available"
-                    )
-                    // Channels are independent of the personal stash; a failed
-                    // download session must not hide them.
-                    syncChannels()
-                    return@launch
-                }
-
-                player.setPlaylist(playlist)
-
-                // Write active earmarks to disk for background/Auto offline recovery.
-                // Use the shuffled order from the controller so cold starts (Android
-                // Auto, background service) replay in the same shuffled sequence.
-                try {
-                    val file = File(getApplication<Application>().filesDir, "earmarks.json")
-                    val json = earmarksToJson(player.getShuffledEarmarks())
-                    val tmp = File(file.parentFile, "${file.name}.tmp")
-                    tmp.writeText(json)
-                    if (!tmp.renameTo(file)) {
-                        file.writeText(json)
-                        tmp.delete()
-                    }
-                } catch (_: Exception) {}
-
-                _state.value = AppState.Playing(earmarks, unavailableCount)
-
-                // Channels are secondary to playback: sync after the player is
-                // running so a slow relay never delays first sound.
-                syncChannels()
-
-            } catch (e: Exception) {
-                _state.value = AppState.Error(e.message ?: "Unknown error")
+                wasRunning = running != null
             }
         }
     }
@@ -424,7 +404,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun playSource(privKeyHex: String, earmarks: List<Earmark>) {
         val uncached = earmarks.filter { cache.getCachedFile(it) == null }
         for ((i, earmark) in uncached.withIndex()) {
-            _state.value = AppState.Downloading(i + 1, uncached.size)
+            // Channel posts are fetched here rather than by the worker: you
+            // tapped a channel chip and are waiting on it. They still get the
+            // resumable `.part` staging, so backgrounding mid-fetch costs the
+            // current chunk and the next attempt carries on.
+            _syncStatus.value = SyncStatus(true, i + 1, uncached.size, earmark.title)
             try {
                 blossomService.downloadAndDecrypt(
                     earmark,
@@ -435,6 +419,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: Exception) {
             }
         }
+        _syncStatus.value = SyncStatus()
         val playlist = earmarks.mapNotNull { e -> cache.getCachedFile(e)?.let { it to e } }
         if (playlist.isEmpty()) {
             _state.value = AppState.Error("No playable tracks available")
@@ -466,7 +451,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     blossom = manifest.copy(chunks = mirrored)
                 )
                 val updated = currentEarmarks + adopted
-                if (publishWithRetry(privKeyHex, updated) == 0) {
+                if (nostrService.publishWithRetry(privKeyHex, updated) == 0) {
                     _notice.value = "Could not save to your list — no relay accepted it."
                     return@launch
                 }
@@ -604,16 +589,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         // Write active earmarks to disk for background/Auto offline recovery.
         // Use the shuffled order so the order survives a restart.
-        try {
-            val file = File(getApplication<Application>().filesDir, "earmarks.json")
-            val json = earmarksToJson(player.getShuffledEarmarks())
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(json)
-            if (!tmp.renameTo(file)) {
-                file.writeText(json)
-                tmp.delete()
-            }
-        } catch (_: Exception) {}
+        store.save(player.getShuffledEarmarks())
 
         _state.value = if (updated.isEmpty()) {
             AppState.Error("No earmarks left")
@@ -642,7 +618,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
 
-                    val acks = publishWithRetry(privKeyHex, updated)
+                    val acks = nostrService.publishWithRetry(privKeyHex, updated)
                     cache.getCachedFile(earmark)?.delete()
 
                     if (acks > 0) {
@@ -658,92 +634,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-    }
-
-    /**
-     * Cleans up earmarks whose Blossom blobs have gone missing (verified by
-     * a 404 from every server for at least one chunk). Best-effort deletes any
-     * surviving chunks from other servers — we already know the earmark is
-     * unplayable, so our only remaining obligation is to avoid leaving orphaned
-     * blobs on other people's Blossom servers. Then republishes the earmark
-     * list without these entries.
-     *
-     * Same sentinel discipline as [deleteCurrent]: a pending-prune marker is
-     * written BEFORE we touch any blob so that a crash between delete and
-     * publish is recoverable on next launch.
-     */
-    private suspend fun cleanupOrphans(
-        privKeyHex: String,
-        fullList: List<Earmark>,
-        orphanedTs: List<Long>
-    ) {
-        orphanedTs.forEach { pendingPrune.add(it) }
-
-        // Best-effort cleanup: 404s count as success inside deleteManifest, so
-        // servers that already lost the blob are fine; we only care about
-        // sweeping away any survivors. A failure here doesn't block republish
-        // — we'd rather fix the pointer than get stuck retrying deletes.
-        for (ts in orphanedTs) {
-            val manifest = fullList.firstOrNull { it.ts == ts }?.blossom ?: continue
-            try {
-                blossomService.deleteManifest(manifest, privKeyHex)
-            } catch (_: Exception) {
-                // Intentionally swallowed: the earmark is already broken from the
-                // user's perspective; a failed sweep just leaves a few orphans,
-                // not a dangling pointer.
-            }
-        }
-
-        val pruned = fullList.filterNot { it.ts in orphanedTs }
-        val acks = publishWithRetry(privKeyHex, pruned)
-        if (acks > 0) {
-            pendingPrune.removeAll(orphanedTs)
-            // Also drop any local cached files for these earmarks.
-            orphanedTs.forEach { ts ->
-                fullList.firstOrNull { it.ts == ts }?.let { cache.getCachedFile(it)?.delete() }
-            }
-
-            // Update saved earmarks list on disk
-            try {
-                val file = File(getApplication<Application>().filesDir, "earmarks.json")
-                val json = earmarksToJson(pruned)
-                val tmp = File(file.parentFile, "${file.name}.tmp")
-                tmp.writeText(json)
-                if (!tmp.renameTo(file)) {
-                    file.writeText(json)
-                    tmp.delete()
-                }
-            } catch (_: Exception) {}
-        }
-        // If every relay failed, leave the sentinel in place — next launch's
-        // reconciliation will retry the publish.
-    }
-
-    /**
-     * Publishes [earmarks] via [NostrService.publishEarmarks] with exponential
-     * backoff. Returns the relay ack count from the first attempt that got
-     * ≥1 ack, or 0 if every attempt failed. Catches exceptions per-attempt so
-     * a transient signing/network failure doesn't break the loop.
-     */
-    private suspend fun publishWithRetry(
-        privKeyHex: String,
-        earmarks: List<Earmark>,
-        maxAttempts: Int = 5
-    ): Int {
-        var delayMs = 1_000L
-        repeat(maxAttempts) { attempt ->
-            try {
-                val acks = nostrService.publishEarmarks(privKeyHex, earmarks)
-                if (acks > 0) return acks
-            } catch (_: Exception) {
-                // fall through to backoff
-            }
-            if (attempt < maxAttempts - 1) {
-                delay(delayMs)
-                delayMs *= 2
-            }
-        }
-        return 0
     }
 
     fun clearKey() {

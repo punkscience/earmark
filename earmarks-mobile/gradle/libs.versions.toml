@@ -11,6 +11,7 @@ datastore = "1.1.1"
 coroutines = "1.8.1"
 bouncycastle = "1.78.1"
 splashscreen = "1.0.1"
+work = "2.9.0"
 junitExt = "1.2.1"
 junit4 = "4.13.2"
 orgJson = "20240303"
@@ -35,6 +36,8 @@ datastore-preferences = { group = "androidx.datastore", name = "datastore-prefer
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "splashscreen" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
+androidx-work-testing = { group = "androidx.work", name = "work-testing", version.ref = "work" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitExt" }
 junit4 = { group = "junit", name = "junit", version.ref = "junit4" }
 org-json = { group = "org.json", name = "json", version.ref = "orgJson" }

@@ -1,4 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Earmarks</string>
+
+    <!-- Background sync notification -->
+    <string name="sync_notification_channel_name">Downloads</string>
+    <string name="sync_notification_channel_description">Progress while new earmarks are fetched in the background.</string>
+    <string name="sync_notification_title">Earmarks</string>
+    <string name="sync_notification_connecting">Checking for new tracks…</string>
+    <string name="sync_notification_downloading">Fetching %1$d of %2$d — %3$s</string>
+    <string name="sync_notification_channels">Refreshing channels…</string>
+
+    <!-- Settings -->
+    <string name="settings_mobile_data_title">Download over mobile data</string>
+    <string name="settings_mobile_data_summary">Off by default — background downloads wait for Wi-Fi.</string>
 </resources>

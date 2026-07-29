@@ -1,7 +1,11 @@
 package com.derpy.earmarks
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -31,12 +35,31 @@ import com.derpy.earmarks.ui.theme.EarmarksTheme
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * The background sync runs as a foreground service and needs somewhere to
+     * put its progress notification. Denying this costs the notification, not
+     * the download — the worker degrades to ordinary background work — so the
+     * result is deliberately ignored rather than nagged about.
+     */
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called BEFORE super.onCreate so the SplashScreen API can hook
         // the activity's launch-time theme and swap it for postSplashScreenTheme.
         installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNotificationPermission()
         setContent {
             EarmarksTheme {
                 Surface(Modifier.fillMaxSize()) {
@@ -55,6 +78,8 @@ class MainActivity : ComponentActivity() {
                         val stats by vm.stats.collectAsState()
                         val notice by vm.notice.collectAsState()
                         val channelState by vm.channelState.collectAsState()
+                        val syncStatus by vm.syncStatus.collectAsState()
+                        val onMobileData by vm.downloadOnMobileData.collectAsState()
 
                         // Channel state lives on the relays and changes from
                         // other devices while this process sits cached in the
@@ -79,6 +104,9 @@ class MainActivity : ComponentActivity() {
                                 stats = stats,
                                 notice = notice,
                                 channelState = channelState,
+                                syncStatus = syncStatus,
+                                downloadOnMobileData = onMobileData,
+                                onSetDownloadOnMobileData = { vm.setDownloadOnMobileData(it) },
                                 onDismissNotice = { vm.dismissNotice() },
                                 onPlayPause = { vm.player.playPause() },
                                 onSkipNext = { vm.player.skipNext() },

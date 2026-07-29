@@ -22,6 +22,5 @@ class CanSyncChannelsTest {
     fun `startup states do not`() {
         assertFalse(canSyncChannels(AppState.KeyMissing))
         assertFalse(canSyncChannels(AppState.Loading("Starting…")))
-        assertFalse(canSyncChannels(AppState.Downloading(1, 3)))
     }
 }
