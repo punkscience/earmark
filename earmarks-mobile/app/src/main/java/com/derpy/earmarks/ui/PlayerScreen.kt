@@ -296,7 +296,9 @@ fun PlayerScreen(
         ) {
             IconButton(
                 onClick = { showDeleteConfirm = true },
-                enabled = controlsEnabled
+                // Delete is for your own stash only — a channel track belongs
+                // to whoever posted it.
+                enabled = controlsEnabled && !listeningToChannel
             ) {
                 Icon(
                     Icons.Default.Delete,

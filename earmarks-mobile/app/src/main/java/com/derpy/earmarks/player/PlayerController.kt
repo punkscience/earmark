@@ -188,6 +188,18 @@ class PlayerController(private val context: Context) {
         _state.value = _state.value.copy(totalTracks = shuffled.size)
     }
 
+    /**
+     * Drops every loaded track. Called when the selected source has nothing
+     * playable, so the player never keeps holding the previous source's
+     * tracks while the chip row names a different one.
+     */
+    fun clearPlaylist() {
+        val mc = controller ?: return
+        if (mc.mediaItemCount == 0) return
+        shuffledEarmarks.clear()
+        mc.clearMediaItems()
+    }
+
     fun playPause() {
         controller?.let { if (it.isPlaying) it.pause() else it.play() }
     }
