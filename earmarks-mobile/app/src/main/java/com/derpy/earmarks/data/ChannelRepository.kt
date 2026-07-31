@@ -28,6 +28,12 @@ data class ChannelSync(val posts: List<ChannelPost>, val state: ChannelState)
  */
 class ChannelRepository(private val nostr: NostrService) {
 
+    /**
+     * The channel state as the relays hold it. An unparseable event degrades to
+     * empty state — the data is gone either way — but an unreachable relay
+     * propagates as an exception: acting on empty-because-offline state is how
+     * a roster gets cached, and published, out of existence.
+     */
     suspend fun loadState(privKeyHex: String): ChannelState = withContext(Dispatchers.IO) {
         val json = nostr.fetchSelfEncrypted(privKeyHex, CHANNEL_STATE_D_TAG)
             ?: return@withContext ChannelState()
@@ -58,19 +64,23 @@ class ChannelRepository(private val nostr: NostrService) {
 
         val since = now - CHANNEL_POST_MAX_AGE_SECONDS - GiftWrap.QUERY_BACKDATE_SECONDS
         // Gift wraps land on the relays we advertise as our inbox, which is
-        // where other people's clients were told to send them.
+        // where other people's clients were told to send them. A failed lookup
+        // is null, not empty: reading falls back to the defaults either way,
+        // but only affirmed absence may trigger the publish below.
         var inbox = try {
             nostr.fetchInboxRelays(myPub)
         } catch (e: Exception) {
-            emptyList()
+            Log.w(TAG, "could not fetch inbox relays: ${e.message}")
+            null
         }
 
         // Channels do not work without an inbox list — senders fall back to
         // guessing and undelivered messages produce no error on either end. So
         // publish one when there is none. An existing list is never touched:
         // kind 10050 governs NIP-17 DMs in every one of this user's clients,
-        // not just ours.
-        if (inbox.isEmpty() && state.channels.isNotEmpty()) {
+        // not just ours — which is also why an unreachable-relay lookup must
+        // not end here, replacing a list that still exists.
+        if (inbox != null && inbox.isEmpty() && state.channels.isNotEmpty()) {
             try {
                 if (nostr.publishInboxRelays(privKeyHex, DEFAULT_INBOX_RELAYS) > 0) {
                     inbox = DEFAULT_INBOX_RELAYS
@@ -80,7 +90,7 @@ class ChannelRepository(private val nostr: NostrService) {
             }
         }
 
-        val wraps = nostr.fetchGiftWraps(myPub, since, inbox)
+        val wraps = nostr.fetchGiftWraps(myPub, since, inbox ?: emptyList())
 
         var changed = false
         dropExpiredPins(state, now)?.let { state = it; changed = true }
@@ -142,7 +152,11 @@ class ChannelRepository(private val nostr: NostrService) {
                     IllegalArgumentException("that track was never uploaded")
                 )
             val myPub = Nip44.derivePubKeyHex(privKeyHex)
-            var state = loadState(privKeyHex)
+            var state = try {
+                loadState(privKeyHex)
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
             val channel = state.find(chanId)
                 ?: return@withContext Result.failure(IllegalArgumentException("unknown channel"))
 
@@ -183,7 +197,11 @@ class ChannelRepository(private val nostr: NostrService) {
     /** Accepts a pending invite. */
     suspend fun acceptInvite(privKeyHex: String, chanId: String): Result<Channel> =
         withContext(Dispatchers.IO) {
-            val state = loadState(privKeyHex)
+            val state = try {
+                loadState(privKeyHex)
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
             val invite = state.findInvite(chanId)
                 ?: return@withContext Result.failure(IllegalArgumentException("no pending invite"))
             state.find(chanId)?.let { return@withContext Result.success(it) }
@@ -215,7 +233,11 @@ class ChannelRepository(private val nostr: NostrService) {
     /** Declines an invite and remembers the decision so it is not re-surfaced. */
     suspend fun declineInvite(privKeyHex: String, chanId: String): Boolean =
         withContext(Dispatchers.IO) {
-            val state = loadState(privKeyHex)
+            val state = try {
+                loadState(privKeyHex)
+            } catch (e: Exception) {
+                return@withContext false
+            }
             saveState(
                 privKeyHex,
                 state.copy(
@@ -228,7 +250,11 @@ class ChannelRepository(private val nostr: NostrService) {
     /** Leaves a channel and tells the other members to stop encrypting to us. */
     suspend fun leave(privKeyHex: String, chanId: String): Boolean = withContext(Dispatchers.IO) {
         val myPub = Nip44.derivePubKeyHex(privKeyHex)
-        val state = loadState(privKeyHex)
+        val state = try {
+            loadState(privKeyHex)
+        } catch (e: Exception) {
+            return@withContext false
+        }
         val channel = state.find(chanId) ?: return@withContext false
 
         val envelope = Envelope(
