@@ -18,7 +18,43 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import kotlin.coroutines.resume
+
+/**
+ * What one relay said when asked for a single event. [Empty] is a relay that
+ * answered EOSE holding nothing; [Unreachable] is a relay that never answered
+ * at all. The two used to collapse into one `null`, and that ambiguity is how
+ * an offline launch read as "your channel state does not exist" — which the
+ * sync then cached, and could even publish, over the real thing.
+ */
+internal sealed interface QueryOutcome {
+    data class Found(val event: JSONObject) : QueryOutcome
+    object Empty : QueryOutcome
+    object Unreachable : QueryOutcome
+}
+
+/**
+ * The newest event across per-relay outcomes, or null when the event genuinely
+ * does not exist.
+ *
+ * Absence is only trusted when every relay actually answered. Addressable
+ * events live on a subset of the relays — the channel state exists on one of
+ * the two defaults today — so "the reachable relay had nothing" must not be
+ * read as "it's gone" while another relay is down.
+ *
+ * @throws IOException when nothing was found and at least one relay was
+ *   unreachable — the caller cannot tell absence from outage, so it must not
+ *   act on either.
+ */
+internal fun resolveNewest(outcomes: List<QueryOutcome>): JSONObject? {
+    val found = outcomes.filterIsInstance<QueryOutcome.Found>().map { it.event }
+    found.maxByOrNull { it.getLong("created_at") }?.let { return it }
+    if (outcomes.any { it is QueryOutcome.Unreachable }) {
+        throw IOException("no relay answered; cannot tell a missing event from a dead relay")
+    }
+    return null
+}
 
 private const val TAG = "NostrService"
 
@@ -71,18 +107,15 @@ class NostrService(private val httpClient: OkHttpClient) {
             put(filterJson)
         }.toString()
 
-        // Query all relays in parallel, collect first valid event from each
-        val events = coroutineScope {
+        // Query all relays in parallel; absence is only believed when every
+        // relay answered, so an offline launch throws (and the sync worker
+        // retries) instead of reporting an empty stash.
+        val outcomes = coroutineScope {
             DEFAULT_RELAYS.map { relay ->
                 async { queryRelay(relay, reqMessage, subscriptionId) }
             }.awaitAll()
-        }.filterNotNull()
-
-        if (events.isEmpty()) return@withContext emptyList()
-
-        // Use the most recent event
-        val bestEvent = events.maxByOrNull { it.getLong("created_at") }
-            ?: return@withContext emptyList()
+        }
+        val bestEvent = resolveNewest(outcomes) ?: return@withContext emptyList()
 
         val encryptedContent = bestEvent.getString("content")
         val plaintext = Nip44.decrypt(privKeyHex, encryptedContent)
@@ -91,7 +124,9 @@ class NostrService(private val httpClient: OkHttpClient) {
 
     /**
      * Fetches and decrypts an addressable kind-30001 event under an arbitrary
-     * `d` tag, self-encrypted to [privKeyHex]. Returns null when none exists.
+     * `d` tag, self-encrypted to [privKeyHex]. Returns null only when the
+     * relays affirmatively hold no such event; throws [IOException] when that
+     * cannot be established because a relay was unreachable.
      *
      * Used for channel state (`earmark-channels`), which is stored exactly like
      * the earmark list but under a different tag.
@@ -111,11 +146,10 @@ class NostrService(private val httpClient: OkHttpClient) {
                 })
             }.toString()
 
-            val events = coroutineScope {
+            val outcomes = coroutineScope {
                 DEFAULT_RELAYS.map { async { queryRelay(it, reqMessage, subscriptionId) } }.awaitAll()
-            }.filterNotNull()
-
-            val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext null
+            }
+            val best = resolveNewest(outcomes) ?: return@withContext null
             try {
                 Nip44.decrypt(privKeyHex, best.getString("content"))
             } catch (e: Exception) {
@@ -139,8 +173,11 @@ class NostrService(private val httpClient: OkHttpClient) {
 
     /**
      * Fetches the user's NIP-17 DM relay list (kind 10050) — the relays other
-     * clients were told to send them gift wraps on. Returns an empty list when
-     * none is published, in which case callers fall back to the defaults.
+     * clients were told to send them gift wraps on. Returns an empty list only
+     * when the relays affirmatively hold none, in which case callers may fall
+     * back to the defaults; throws [IOException] when absence cannot be
+     * established, because publishing a default list over a real one that was
+     * merely unreachable would redirect this user's DMs.
      */
     suspend fun fetchInboxRelays(pubKeyHex: String): List<String> = withContext(Dispatchers.IO) {
         val subscriptionId = "inbox-${System.currentTimeMillis()}"
@@ -154,12 +191,12 @@ class NostrService(private val httpClient: OkHttpClient) {
             })
         }.toString()
 
-        val events = coroutineScope {
+        val outcomes = coroutineScope {
             (DEFAULT_RELAYS + NIP65_INDEX_RELAYS).map {
                 async { queryRelay(it, reqMessage, subscriptionId) }
             }.awaitAll()
-        }.filterNotNull()
-        val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext emptyList()
+        }
+        val best = resolveNewest(outcomes) ?: return@withContext emptyList()
 
         val tags = best.optJSONArray("tags") ?: return@withContext emptyList()
         (0 until tags.length()).mapNotNull { i ->
@@ -198,6 +235,11 @@ class NostrService(private val httpClient: OkHttpClient) {
      * Reads from [inboxRelays] when the user has published a NIP-17 list, since
      * that is where senders were told to deliver. Falling back to the defaults
      * means messages sent to a relay we do not read are simply never seen.
+     *
+     * A partial answer is fine — the next sync re-reads the whole window — but
+     * total silence throws [IOException]: zero wraps because nobody posted and
+     * zero wraps because the network was down must not look alike, or an
+     * offline sync would cache "no posts anywhere" over the real feed.
      */
     suspend fun fetchGiftWraps(
         pubKeyHex: String,
@@ -220,10 +262,13 @@ class NostrService(private val httpClient: OkHttpClient) {
             val perRelay = coroutineScope {
                 relays.map { async { queryRelayAll(it, reqMessage, subscriptionId) } }.awaitAll()
             }
+            if (perRelay.none { it.responsive }) {
+                throw IOException("no relay answered the gift wrap query")
+            }
             val seen = HashSet<String>()
             val out = mutableListOf<JSONObject>()
-            for (events in perRelay) {
-                for (ev in events) {
+            for (batch in perRelay) {
+                for (ev in batch.events) {
                     if (seen.add(ev.optString("id"))) out.add(ev)
                 }
             }
@@ -251,10 +296,12 @@ class NostrService(private val httpClient: OkHttpClient) {
             })
         }.toString()
 
-        val events = coroutineScope {
+        // Lenient on purpose, unlike the other fetches: follows grant nothing,
+        // so treating an outage as "follows nobody" costs one quiet invite.
+        val best = coroutineScope {
             DEFAULT_RELAYS.map { async { queryRelay(it, reqMessage, subscriptionId) } }.awaitAll()
-        }.filterNotNull()
-        val best = events.maxByOrNull { it.getLong("created_at") } ?: return@withContext emptyList()
+        }.filterIsInstance<QueryOutcome.Found>().map { it.event }
+            .maxByOrNull { it.getLong("created_at") } ?: return@withContext emptyList()
 
         val tags = best.optJSONArray("tags") ?: return@withContext emptyList()
         (0 until tags.length()).mapNotNull { i ->
@@ -366,15 +413,16 @@ class NostrService(private val httpClient: OkHttpClient) {
     }
 
     /**
-     * Opens a WebSocket to [relayUrl], sends [reqMessage], and waits for a matching EVENT.
-     * Returns the event JSONObject or null on failure/timeout.
+     * Opens a WebSocket to [relayUrl], sends [reqMessage], and waits for a
+     * matching EVENT or EOSE. Never returns a bare null: the caller needs to
+     * know whether the relay answered "nothing here" or never answered.
      */
     private suspend fun queryRelay(
         relayUrl: String,
         reqMessage: String,
         subscriptionId: String
-    ): JSONObject? = withTimeoutOrNull(15_000L) {
-        suspendCancellableCoroutine { cont ->
+    ): QueryOutcome = withTimeoutOrNull(15_000L) {
+        suspendCancellableCoroutine<QueryOutcome> { cont ->
             val request = Request.Builder().url(relayUrl).build()
             val ws = httpClient.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -389,27 +437,36 @@ class NostrService(private val httpClient: OkHttpClient) {
                             val event = msg.getJSONObject(2)
                             if (cont.isActive) {
                                 webSocket.close(1000, null)
-                                cont.resume(event)
+                                cont.resume(QueryOutcome.Found(event))
                             }
                         } else if (type == "EOSE") {
-                            // End of stored events — nothing found
+                            // End of stored events — the relay answered and
+                            // holds nothing.
                             webSocket.close(1000, null)
-                            if (cont.isActive) cont.resume(null)
+                            if (cont.isActive) cont.resume(QueryOutcome.Empty)
                         }
                     } catch (_: Exception) {}
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (cont.isActive) cont.resume(null)
+                    if (cont.isActive) cont.resume(QueryOutcome.Unreachable)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (cont.isActive) cont.resume(null)
+                    if (cont.isActive) cont.resume(QueryOutcome.Unreachable)
                 }
             })
             cont.invokeOnCancellation { ws.cancel() }
         }
-    }
+    } ?: QueryOutcome.Unreachable
+
+    /**
+     * A multi-event query's haul from one relay. [responsive] is true when the
+     * relay gave any sign of life — an EOSE or at least one event. A relay that
+     * was silent start to finish holds an unknown number of messages, which is
+     * different from holding none.
+     */
+    private data class RelayBatch(val events: List<JSONObject>, val responsive: Boolean)
 
     /**
      * Like [queryRelay] but accumulates every matching event until EOSE.
@@ -422,8 +479,9 @@ class NostrService(private val httpClient: OkHttpClient) {
         relayUrl: String,
         reqMessage: String,
         subscriptionId: String
-    ): List<JSONObject> {
+    ): RelayBatch {
         val collected = mutableListOf<JSONObject>()
+        var sawEose = false
         withTimeoutOrNull(20_000L) {
             suspendCancellableCoroutine { cont ->
                 val request = Request.Builder().url(relayUrl).build()
@@ -440,6 +498,7 @@ class NostrService(private val httpClient: OkHttpClient) {
                                     synchronized(collected) { collected.add(msg.getJSONObject(2)) }
                                 }
                                 "EOSE" -> {
+                                    sawEose = true
                                     webSocket.close(1000, null)
                                     if (cont.isActive) cont.resume(Unit)
                                 }
@@ -459,6 +518,7 @@ class NostrService(private val httpClient: OkHttpClient) {
                 cont.invokeOnCancellation { ws.cancel() }
             }
         }
-        return synchronized(collected) { collected.toList() }
+        val events = synchronized(collected) { collected.toList() }
+        return RelayBatch(events, responsive = sawEose || events.isNotEmpty())
     }
 }
