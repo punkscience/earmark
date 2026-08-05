@@ -43,8 +43,10 @@ sealed interface AppState {
      * [unavailable] is the number of earmarks in the list that have no playable
      * file on disk yet — still downloading, or failed for transient reasons
      * (network, 5xx, SHA mismatch). They're still in the published list; we
-     * just can't play them right now. Orphaned earmarks (definitively gone from
-     * Blossom) are pruned silently and do not contribute to this count.
+     * just can't play them right now. Once an earmark has been confirmed gone
+     * from Blossom by enough separate syncs it is pruned silently and stops
+     * contributing; while it is still only suspected it counts here, which is
+     * the honest reading — it is in your list and it will not play.
      */
     data class Playing(val earmarks: List<Earmark>, val unavailable: Int = 0) : AppState
     data class Error(val message: String) : AppState
