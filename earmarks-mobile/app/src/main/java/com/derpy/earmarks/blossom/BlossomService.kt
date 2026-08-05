@@ -387,7 +387,8 @@ class BlossomService(
         // Earmarks published before the manifest carried a server list have
         // none. That says nothing about where the blob is, so it is asked for
         // wherever this client puts its own — not written off unread.
-        val servers = chunk.servers.ifEmpty { fallbackServers }
+        val recorded = chunk.servers.isNotEmpty()
+        val servers = if (recorded) chunk.servers else fallbackServers
         for (server in servers) {
             try {
                 val url = "${server.trimEnd('/')}/${chunk.sha256}"
@@ -423,9 +424,22 @@ class BlossomService(
         // Orphaning is irreversible, so it takes a server actually saying 404.
         // Without that this is a chunk nobody was asked about — no servers to
         // try — which is ignorance, not proof of absence.
-        return if (allNotFound && sawNotFound) ChunkFetchResult.AllNotFound
+        //
+        // It also takes a 404 from a server the manifest actually named. The
+        // fallback above is a good-faith search for a blob whose location was
+        // never recorded; a 404 from a server that was never told to hold it is
+        // not evidence that it was deleted, only that this client does not know
+        // where it went. Such a chunk can be unavailable forever, and that is
+        // the right outcome — a visible entry that will not play is recoverable
+        // by re-earmarking, and a deleted one is not.
+        return if (allNotFound && sawNotFound && recorded) ChunkFetchResult.AllNotFound
         else ChunkFetchResult.TransientFailure(
-            firstError ?: "no Blossom server was reachable for ${chunk.sha256.take(8)}"
+            firstError ?: if (sawNotFound) {
+                "${chunk.sha256.take(8)} is on no server this client knows of, and its " +
+                    "manifest never recorded where it went"
+            } else {
+                "no Blossom server was reachable for ${chunk.sha256.take(8)}"
+            }
         )
     }
 
