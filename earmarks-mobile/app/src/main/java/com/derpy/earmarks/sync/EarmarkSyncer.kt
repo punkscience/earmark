@@ -8,6 +8,7 @@ import com.derpy.earmarks.data.Earmark
 import com.derpy.earmarks.data.EarmarkCache
 import com.derpy.earmarks.data.EarmarkStore
 import com.derpy.earmarks.data.KeyStore
+import com.derpy.earmarks.data.OrphanStrikeStore
 import com.derpy.earmarks.data.PendingPruneStore
 import com.derpy.earmarks.net.Http
 import com.derpy.earmarks.nostr.NostrService
@@ -40,6 +41,7 @@ class EarmarkSyncer(context: Context) {
     private val cache = EarmarkCache(appContext)
     private val store = EarmarkStore(appContext)
     private val pendingPrune = PendingPruneStore(appContext)
+    private val orphanStrikes = OrphanStrikeStore(appContext)
     private val channelCache = ChannelCache(appContext)
     private val channelRepo = ChannelRepository(nostrService)
 
@@ -115,6 +117,10 @@ class EarmarkSyncer(context: Context) {
 
         if (earmarks.isNotEmpty()) {
             cache.pruneExpired(earmarks.map { it.ts }.toSet() + channelPosts.map { it.ts })
+            // Evidence about earmarks that are no longer listed is dead weight.
+            // Guarded on a non-empty list so a read that came back with nothing
+            // can't wipe the counts for a stash that is still there.
+            orphanStrikes.retainOnly(earmarks.map { it.ts })
         }
 
         // Personal earmarks first — your own stash is what the player falls
@@ -139,11 +145,25 @@ class EarmarkSyncer(context: Context) {
                 BlossomService.DownloadResult.Unavailable(e.message ?: "unknown")
             }
             when (result) {
-                is BlossomService.DownloadResult.Success -> downloaded++
+                is BlossomService.DownloadResult.Success -> {
+                    downloaded++
+                    // The blobs are demonstrably there, which contradicts any
+                    // earlier orphan report rather than merely not adding to it.
+                    orphanStrikes.clear(earmark.ts)
+                }
                 // Only the personal list can be republished to drop an orphan.
                 // A channel post that has gone is the sender's business.
+                //
+                // A 404 from every server is not proof on its own — a Blossom
+                // server that has been reinstalled or put behind a broken proxy
+                // says the same thing — so it buys a strike, and only a track
+                // several independent syncs agree about gets swept.
                 is BlossomService.DownloadResult.Orphaned ->
-                    if (earmarks.any { it.ts == earmark.ts }) orphanedTs += earmark.ts
+                    if (earmarks.any { it.ts == earmark.ts } &&
+                        orphanStrikes.record(earmark.ts)
+                    ) {
+                        orphanedTs += earmark.ts
+                    }
                 is BlossomService.DownloadResult.Unavailable -> unavailable++
             }
         }
@@ -200,9 +220,10 @@ class EarmarkSyncer(context: Context) {
 
     /**
      * Cleans up earmarks whose blobs are verifiably gone — a 404 from every
-     * server for at least one chunk. Best-effort sweeps any surviving chunks
-     * off other people's Blossom servers, then republishes the list without
-     * these entries.
+     * server for at least one chunk, seen by enough separate syncs to rule out
+     * one server having a bad day (see [com.derpy.earmarks.data.OrphanStrikeStore]).
+     * Best-effort sweeps any surviving chunks off other people's Blossom
+     * servers, then republishes the list without these entries.
      *
      * Same sentinel discipline as a user-initiated delete: the pending-prune
      * marker is written BEFORE any blob is touched, so a crash between the

@@ -16,10 +16,14 @@ import com.derpy.earmarks.R
  * Whether a finished sync deserves a backed-off retry.
  *
  * Only tracks that failed for possibly-transient reasons — a dropped
- * connection, a 5xx, a SHA mismatch — earn one. Orphans deliberately do not:
- * their blobs are provably gone and the run already resolved them by
- * republishing the list without them, so retrying would just repeat a fetch
- * that can never succeed. Nothing to sync is a success, not a failure.
+ * connection, a 5xx, a SHA mismatch — earn one. Orphans deliberately do not,
+ * whether or not the run acted on them. A track that had enough strikes was
+ * already resolved by republishing the list without it, so a retry would
+ * re-fetch something that provably cannot be fetched. A track still
+ * accumulating strikes is not resolved, but retrying it here would not help
+ * either: strikes only count an hour apart, so a backed-off retry minutes later
+ * gathers no new evidence. The next scheduled pass is what advances it.
+ * Nothing to sync is a success, not a failure.
  *
  * Retrying is close to free now that partial downloads survive: the next
  * attempt resumes from the last verified chunk rather than starting over.

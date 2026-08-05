@@ -34,9 +34,12 @@ import javax.crypto.spec.SecretKeySpec
  * the earmark list without the track. Four of them went that way before anyone
  * noticed, and the audio is not recoverable.
  *
- * These tests pin both halves of the replacement: an unlisted chunk is looked
- * for on the client's own servers, and no chunk is ever orphaned without a
- * server having actually said 404.
+ * These tests pin the replacement contract. An unlisted chunk is looked for on
+ * the client's own servers. No chunk is ever orphaned without a server having
+ * actually said 404 — and that 404 has to come from a server the manifest
+ * itself named, because the fallback is a search for a blob whose location was
+ * never recorded, and a server that was never told to hold something cannot
+ * testify that it was deleted.
  */
 class BlossomServiceMissingServersTest {
 
@@ -96,7 +99,10 @@ class BlossomServiceMissingServersTest {
     fun tearDown() = server.shutdown()
 
     /** An earmark whose single chunk names no servers — the pre-`servers` shape. */
-    private fun earmarkWithoutServers() = Earmark(
+    private fun earmarkWithoutServers() = earmarkNaming(emptyList())
+
+    /** An earmark whose single chunk records [servers] as where the blob went. */
+    private fun earmarkNaming(servers: List<String>) = Earmark(
         artist = "Damian's Ghost",
         album = "Universalis",
         title = "Visions",
@@ -104,7 +110,7 @@ class BlossomServiceMissingServersTest {
         blossom = BlossomManifest(
             key = Base64.getEncoder().encodeToString(aesKey),
             ext = ".flac",
-            chunks = listOf(Chunk(index = 0, sha256 = sha, size = blob.size, servers = emptyList()))
+            chunks = listOf(Chunk(index = 0, sha256 = sha, size = blob.size, servers = servers))
         )
     )
 
@@ -192,9 +198,12 @@ class BlossomServiceMissingServersTest {
     }
 
     @Test
-    fun aFallbackServerSaying404StillOrphans() = runBlocking {
-        // The other half of the contract: a real 404 from a real request is
-        // still proof, so genuinely dead tracks are still cleaned up.
+    fun aFallbackServerSaying404DoesNotOrphan() = runBlocking {
+        // The fallback is a good-faith search for a blob whose location was
+        // never recorded. A 404 from a server that was never told to hold it
+        // says this client does not know where the blob went, not that it was
+        // deleted — and the four tracks that started all this had exactly this
+        // shape. Unavailable forever is the recoverable outcome; deleted is not.
         notFound = true
         val fallback = listOf(server.url("/").toString().trimEnd('/'))
         val service = BlossomService(OkHttpClient(), fallback)
@@ -203,7 +212,29 @@ class BlossomServiceMissingServersTest {
             val result = service.downloadAndDecrypt(earmarkWithoutServers(), dest, part, privKeyHex)
 
             assertTrue(
-                "a 404 from every server is still an orphan, got $result",
+                "a 404 from a server the manifest never named is not proof, got $result",
+                result is BlossomService.DownloadResult.Unavailable
+            )
+            assertEquals("the fallback is still asked", listOf("/$sha"), requested)
+        } finally {
+            dest.parentFile?.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aRecordedServerSaying404StillOrphans() = runBlocking {
+        // The other half of the contract. A manifest that names where it put
+        // the blob, and that server saying 404, is the evidence orphaning is
+        // for — without this the cleanup path would be dead code.
+        notFound = true
+        val url = server.url("/").toString().trimEnd('/')
+        val service = BlossomService(OkHttpClient(), emptyList())
+        val (dest, part) = tempPair()
+        try {
+            val result = service.downloadAndDecrypt(earmarkNaming(listOf(url)), dest, part, privKeyHex)
+
+            assertTrue(
+                "a 404 from the server that was named is still an orphan, got $result",
                 result is BlossomService.DownloadResult.Orphaned
             )
             assertEquals(listOf("/$sha"), requested)
