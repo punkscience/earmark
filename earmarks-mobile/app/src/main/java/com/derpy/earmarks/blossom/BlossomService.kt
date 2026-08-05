@@ -302,34 +302,43 @@ class BlossomService(
      * implement `/mirror` is simply left out — the caller keeps the original
      * servers in the manifest, so the track stays playable either way, it just
      * is not independently hosted.
+     *
+     * A chunk whose manifest names no source falls back to this client's own
+     * servers, for the same reason [downloadChunk] does: an unrecorded home is
+     * not the same as no home, and mirroring nothing silently left the adopted
+     * track dependent on the poster's stash.
      */
     suspend fun mirrorChunk(
         chunk: Chunk,
         destinationServers: List<String>,
         privKeyHex: String
     ): List<String> = withContext(Dispatchers.IO) {
-        val source = chunk.servers.firstOrNull() ?: return@withContext emptyList()
-        val sourceUrl = "${source.trimEnd('/')}/${chunk.sha256}"
+        val sources = chunk.servers.ifEmpty { fallbackServers }
+        if (sources.isEmpty()) return@withContext emptyList()
 
         coroutineScope {
             destinationServers.map { dest ->
                 async {
-                    try {
-                        val token = blossomAuthToken(privKeyHex, chunk.sha256, "upload")
-                        val body = org.json.JSONObject()
-                            .put("url", sourceUrl)
-                            .toString()
-                            .toRequestBody("application/json".toMediaType())
-                        val request = Request.Builder()
-                            .url("${dest.trimEnd('/')}/mirror")
-                            .put(body)
-                            .header("Authorization", "Nostr $token")
-                            .build()
-                        httpClient.newCall(request).execute().use { response ->
-                            if (response.isSuccessful) dest else null
+                    // Each candidate source in turn: a destination can only
+                    // mirror from a URL that actually serves the blob.
+                    sources.firstNotNullOfOrNull { source ->
+                        try {
+                            val token = blossomAuthToken(privKeyHex, chunk.sha256, "upload")
+                            val body = org.json.JSONObject()
+                                .put("url", "${source.trimEnd('/')}/${chunk.sha256}")
+                                .toString()
+                                .toRequestBody("application/json".toMediaType())
+                            val request = Request.Builder()
+                                .url("${dest.trimEnd('/')}/mirror")
+                                .put(body)
+                                .header("Authorization", "Nostr $token")
+                                .build()
+                            httpClient.newCall(request).execute().use { response ->
+                                if (response.isSuccessful) dest else null
+                            }
+                        } catch (e: Exception) {
+                            null
                         }
-                    } catch (e: Exception) {
-                        null
                     }
                 }
             }.awaitAll()

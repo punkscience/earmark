@@ -10,6 +10,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import okio.Buffer
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -53,6 +54,12 @@ class BlossomServiceMissingServersTest {
     /** Every path the server was asked for, to prove a request happened. */
     private val requested = mutableListOf<String>()
 
+    /** Source URLs handed to `PUT /mirror`, in the order they were tried. */
+    private val mirroredFrom = mutableListOf<String>()
+
+    /** When set, `/mirror` rejects a source URL starting with this prefix. */
+    private var mirrorRejects: String? = null
+
     @Before
     fun setUp() {
         val nonce = ByteArray(12) { it.toByte() }
@@ -69,6 +76,15 @@ class BlossomServiceMissingServersTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 requested += request.path.orEmpty()
+                if (request.path == "/mirror") {
+                    val from = JSONObject(request.body.readUtf8()).getString("url")
+                    mirroredFrom += from
+                    val reject = mirrorRejects
+                    if (reject != null && from.startsWith(reject)) {
+                        return MockResponse().setResponseCode(400)
+                    }
+                    return MockResponse().setResponseCode(200)
+                }
                 if (notFound) return MockResponse().setResponseCode(404)
                 return MockResponse().setResponseCode(200).setBody(Buffer().write(blob))
             }
@@ -131,6 +147,48 @@ class BlossomServiceMissingServersTest {
         } finally {
             dest.parentFile?.deleteRecursively()
         }
+    }
+
+    @Test
+    fun mirroringAChunkNamingNoSourceFallsBackRatherThanCopyingNothing() = runBlocking {
+        // Adopting a channel post whose chunk lists no source used to return
+        // an empty list without a request, leaving the "kept" track hosted
+        // only on the poster's stash — theirs to delete.
+        val url = server.url("/").toString().trimEnd('/')
+        val service = BlossomService(OkHttpClient(), listOf(url))
+        val chunk = Chunk(index = 0, sha256 = sha, size = blob.size, servers = emptyList())
+
+        val hosted = service.mirrorChunk(chunk, listOf(url), privKeyHex)
+
+        assertEquals(listOf(url), hosted)
+        assertEquals(listOf("$url/$sha"), mirroredFrom)
+    }
+
+    @Test
+    fun mirroringTriesTheNextCandidateSourceWhenOneIsRejected() = runBlocking {
+        // The candidate list is candidates, not a single guess: a source the
+        // destination cannot fetch from must not end the attempt.
+        val url = server.url("/").toString().trimEnd('/')
+        mirrorRejects = "https://dead.example"
+        val service = BlossomService(OkHttpClient(), listOf("https://dead.example", url))
+        val chunk = Chunk(index = 0, sha256 = sha, size = blob.size, servers = emptyList())
+
+        val hosted = service.mirrorChunk(chunk, listOf(url), privKeyHex)
+
+        assertEquals(listOf(url), hosted)
+        assertEquals(listOf("https://dead.example/$sha", "$url/$sha"), mirroredFrom)
+    }
+
+    @Test
+    fun mirroringWithNoSourceAnywhereRequestsNothing() = runBlocking {
+        val url = server.url("/").toString().trimEnd('/')
+        val service = BlossomService(OkHttpClient(), emptyList())
+        val chunk = Chunk(index = 0, sha256 = sha, size = blob.size, servers = emptyList())
+
+        val hosted = service.mirrorChunk(chunk, listOf(url), privKeyHex)
+
+        assertTrue("nothing to mirror from, so nothing hosted", hosted.isEmpty())
+        assertTrue("nothing should have been requested", requested.isEmpty())
     }
 
     @Test
