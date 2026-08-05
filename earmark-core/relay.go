@@ -71,36 +71,69 @@ const queryStragglerGrace = 2 * time.Second
 // missed. For addressable events that resolves itself on the next query, and
 // it is a far better failure mode than every command blocking for 20 seconds.
 func QueryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nostr.Event {
+	ev, _ := queryRelaysResolved(ctx, relays, filter)
+	return ev
+}
+
+// relayReply is one relay's answer. A nil event with answered set is a relay
+// that holds nothing; answered unset is a relay that never spoke — it failed to
+// connect, or the subscription itself errored.
+type relayReply struct {
+	event    *nostr.Event
+	answered bool
+}
+
+// queryRelaysResolved is QueryRelays plus whether the answer can be trusted as
+// the current state.
+//
+// resolved is false in exactly one case: no event, and at least one relay never
+// answered. Nothing else distinguishes "you have no list" from "nobody could be
+// asked", and a caller that reads the second as the first and then publishes
+// replaces a list it never saw. That is how four earmarks were lost.
+//
+// A found event is always resolved. It may still be a stale copy from a fast
+// relay while a slower one holds newer — see the straggler note on QueryRelays
+// — but that is a different failure with a different fix.
+func queryRelaysResolved(ctx context.Context, relays []string, filter nostr.Filter) (*nostr.Event, bool) {
 	if len(relays) == 0 {
-		return nil
+		// Nowhere to ask is not the same as nothing to find.
+		return nil, false
 	}
-	ch := make(chan *nostr.Event, len(relays))
+	ch := make(chan relayReply, len(relays))
 	for _, u := range relays {
 		u := u
 		go func() {
 			relay, err := nostr.RelayConnect(ctx, u)
 			if err != nil {
-				ch <- nil
+				ch <- relayReply{}
 				return
 			}
 			evs, err := relay.QuerySync(ctx, filter)
 			relay.Close()
-			if err != nil || len(evs) == 0 {
-				ch <- nil
+			if err != nil {
+				ch <- relayReply{}
 				return
 			}
-			ch <- evs[0]
+			if len(evs) == 0 {
+				ch <- relayReply{answered: true}
+				return
+			}
+			ch <- relayReply{event: evs[0], answered: true}
 		}()
 	}
 
 	var latest *nostr.Event
+	unreachable := 0
 	var settle <-chan time.Time
 	for replies := 0; replies < len(relays); {
 		select {
-		case ev := <-ch:
+		case r := <-ch:
 			replies++
-			if ev != nil && (latest == nil || ev.CreatedAt > latest.CreatedAt) {
-				latest = ev
+			if !r.answered {
+				unreachable++
+			}
+			if r.event != nil && (latest == nil || r.event.CreatedAt > latest.CreatedAt) {
+				latest = r.event
 			}
 			// Start the grace clock on the first usable answer.
 			if latest != nil && settle == nil {
@@ -108,13 +141,15 @@ func QueryRelays(ctx context.Context, relays []string, filter nostr.Filter) *nos
 				defer timer.Stop()
 				settle = timer.C
 			}
+		// Abandoning stragglers leaves relays unheard from, so absence can
+		// never be affirmed on these paths — only a found event can.
 		case <-settle:
-			return latest
+			return latest, latest != nil
 		case <-ctx.Done():
-			return latest
+			return latest, latest != nil
 		}
 	}
-	return latest
+	return latest, latest != nil || unreachable == 0
 }
 
 // QueryRelaysAll queries every relay concurrently and returns the union of all

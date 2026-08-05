@@ -143,8 +143,16 @@ func LoadChannelState(ctx context.Context, hexPrivKey string) (*ChannelState, er
 	if err != nil {
 		return nil, err
 	}
-	ev := fetchEarmarkEvent(ctx, pubHex, channelStateTag)
+	ev, resolved := fetchEarmarkEvent(ctx, pubHex, channelStateTag)
 	if ev == nil {
+		// Empty-because-offline must not read as "you are in no channels".
+		// Callers save this state straight back, which would publish an empty
+		// roster over the real one, and CleanupOldEarmarks derives its pinned
+		// chunks from it — an empty state there un-protects every chunk lent
+		// to a channel and the purge deletes the recipients' copies.
+		if !resolved {
+			return nil, errUnresolvedList
+		}
 		return &ChannelState{V: ChannelEnvelopeVersion}, nil
 	}
 	plaintext, err := nip44.Decrypt(ev.Content, convKey)

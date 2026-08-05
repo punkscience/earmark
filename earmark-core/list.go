@@ -3,6 +3,7 @@ package earmark
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -56,27 +57,39 @@ func fetchEarmarksCtx(ctx context.Context, hexPrivKey string) ([]Earmark, error)
 	if err != nil {
 		return nil, err
 	}
-	latest := fetchEarmarkEvent(ctx, pubHex, earmarkListTag)
+	latest, resolved := fetchEarmarkEvent(ctx, pubHex, earmarkListTag)
 	if latest == nil {
+		if !resolved {
+			return nil, errUnresolvedList
+		}
 		return []Earmark{}, nil
 	}
 	return decryptEarmarks(latest, convKey)
 }
 
+// errUnresolvedList is returned when the list could not be read rather than
+// read as empty. Callers republish what they read, so the two must never be
+// confused: an unresolved read that publishes wipes the real list.
+var errUnresolvedList = errors.New(
+	"could not read the current list: no relay answered, so an empty result cannot be trusted",
+)
+
 // fetchEarmarkEvent fetches the latest kind-30001 addressable event with the
-// given d tag.
+// given d tag, and whether that answer can be trusted — see
+// [queryRelaysResolved]. A nil event with resolved false means the relays could
+// not be reached, not that the event does not exist.
 //
 // Reads from the user's outbox set (NIP-65 write relays ∪ configured relays),
 // which is the same set it is published to — so the newest version is found
 // even when the configured relays and the user's relay list do not overlap.
-func fetchEarmarkEvent(ctx context.Context, pubHex, dTag string) *nostr.Event {
+func fetchEarmarkEvent(ctx context.Context, pubHex, dTag string) (*nostr.Event, bool) {
 	filter := nostr.Filter{
 		Kinds:   []int{earmarkKind},
 		Authors: []string{pubHex},
 		Tags:    nostr.TagMap{"d": []string{dTag}},
 		Limit:   1,
 	}
-	return QueryRelays(ctx, UserPublishRelays(pubHex), filter)
+	return queryRelaysResolved(ctx, UserPublishRelays(pubHex), filter)
 }
 
 func decryptEarmarks(ev *nostr.Event, convKey [32]byte) ([]Earmark, error) {
@@ -103,7 +116,12 @@ func MigrateLegacyEarmarks(hexPrivKey string) (int, error) {
 		return 0, fmt.Errorf("could not derive public key: %w", err)
 	}
 	legacyCtx, legacyCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	legacyEv := fetchEarmarkEvent(legacyCtx, pubHex, legacyEarmarkListTag)
+	// Resolvedness is deliberately ignored here: an unresolved lookup is not
+	// "no legacy list", but this branch publishes nothing either way and every
+	// run retries, so it stays quiet rather than warning on each offline
+	// invocation. The read that must not be confused with empty is the current
+	// list below, which FetchEarmarks now refuses to guess at.
+	legacyEv, _ := fetchEarmarkEvent(legacyCtx, pubHex, legacyEarmarkListTag)
 	legacyCancel()
 	if legacyEv == nil {
 		return 0, nil
@@ -179,10 +197,17 @@ func isDuplicateEarmark(existing []Earmark, e Earmark) bool {
 }
 
 // AddEarmark appends a new earmark and republishes the encrypted list.
+//
+// Refuses to publish when the current list could not be read. The list is one
+// addressable event, so appending to what a failed read returned — nothing —
+// publishes a list of one over everything that was there.
 func AddEarmark(hexPrivKey string, e Earmark) error {
 	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	existing, _ := fetchEarmarksCtx(fetchCtx, hexPrivKey)
+	existing, err := fetchEarmarksCtx(fetchCtx, hexPrivKey)
 	fetchCancel()
+	if err != nil {
+		return fmt.Errorf("not adding %q: %w", e.Title, err)
+	}
 
 	if isDuplicateEarmark(existing, e) {
 		return nil
