@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import com.derpy.earmarks.blossom.BlossomService
+import com.derpy.earmarks.blossom.DEFAULT_BLOSSOM_SERVERS
 import com.derpy.earmarks.data.ChannelCache
 import com.derpy.earmarks.data.ChannelInvite
 import com.derpy.earmarks.data.ChannelPost
@@ -139,16 +140,6 @@ internal fun earmarksForSource(
  * another member's blobs off Blossom.
  */
 internal fun canDeleteFrom(source: PlayerSource): Boolean = source is PlayerSource.MyEarmarks
-
-/**
- * Where an adopted track is mirrored to. Matches the Go clients' built-in
- * defaults; kind-10063 discovery is a desktop concern for now, so the phone
- * mirrors to the same primary the CLI uploads to.
- */
-private val MY_BLOSSOM_SERVERS = listOf(
-    "https://blossom.towerofsong.ca",
-    "https://blossom.band"
-)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -486,7 +477,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val manifest = post.earmark.blossom ?: return@launch
             try {
                 val mirrored = manifest.chunks.map { chunk ->
-                    val hosted = blossomService.mirrorChunk(chunk, MY_BLOSSOM_SERVERS, privKeyHex)
+                    val hosted =
+                        blossomService.mirrorChunk(chunk, DEFAULT_BLOSSOM_SERVERS, privKeyHex)
                     chunk.copy(servers = (hosted + chunk.servers).distinct())
                 }
                 val adopted = post.earmark.copy(

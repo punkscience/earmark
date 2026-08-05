@@ -25,6 +25,20 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
+ * The Blossom servers this client uses: the destinations an adopted track is
+ * mirrored to, and the servers a chunk is looked for on when its manifest does
+ * not say. `blossom.towerofsong.ca` is the self-hosted primary the Go clients
+ * upload to; `blossom.band` is the public fallback.
+ *
+ * Matches the Go clients' built-in defaults. kind-10063 discovery is a desktop
+ * concern for now, so the phone works from this fixed list.
+ */
+val DEFAULT_BLOSSOM_SERVERS = listOf(
+    "https://blossom.towerofsong.ca",
+    "https://blossom.band"
+)
+
+/**
  * Blossom chunk transfer: download + SHA-256 verify + AES-256-GCM decrypt,
  * plus BUD-01 delete and BUD-04 mirror.
  *
@@ -34,7 +48,11 @@ import java.util.concurrent.TimeUnit
  * wrap code follows. Both encode standard padded base64, which is what the Go
  * clients emit (`base64.StdEncoding` in `earmark-core/blossom.go`).
  */
-class BlossomService(private val httpClient: OkHttpClient) {
+class BlossomService(
+    private val httpClient: OkHttpClient,
+    /** Where a chunk is looked for when its manifest lists no servers. */
+    private val fallbackServers: List<String> = DEFAULT_BLOSSOM_SERVERS
+) {
 
     /**
      * Used for chunk fetches only. `readTimeout` bounds the gap between bytes,
@@ -284,34 +302,43 @@ class BlossomService(private val httpClient: OkHttpClient) {
      * implement `/mirror` is simply left out — the caller keeps the original
      * servers in the manifest, so the track stays playable either way, it just
      * is not independently hosted.
+     *
+     * A chunk whose manifest names no source falls back to this client's own
+     * servers, for the same reason [downloadChunk] does: an unrecorded home is
+     * not the same as no home, and mirroring nothing silently left the adopted
+     * track dependent on the poster's stash.
      */
     suspend fun mirrorChunk(
         chunk: Chunk,
         destinationServers: List<String>,
         privKeyHex: String
     ): List<String> = withContext(Dispatchers.IO) {
-        val source = chunk.servers.firstOrNull() ?: return@withContext emptyList()
-        val sourceUrl = "${source.trimEnd('/')}/${chunk.sha256}"
+        val sources = chunk.servers.ifEmpty { fallbackServers }
+        if (sources.isEmpty()) return@withContext emptyList()
 
         coroutineScope {
             destinationServers.map { dest ->
                 async {
-                    try {
-                        val token = blossomAuthToken(privKeyHex, chunk.sha256, "upload")
-                        val body = org.json.JSONObject()
-                            .put("url", sourceUrl)
-                            .toString()
-                            .toRequestBody("application/json".toMediaType())
-                        val request = Request.Builder()
-                            .url("${dest.trimEnd('/')}/mirror")
-                            .put(body)
-                            .header("Authorization", "Nostr $token")
-                            .build()
-                        httpClient.newCall(request).execute().use { response ->
-                            if (response.isSuccessful) dest else null
+                    // Each candidate source in turn: a destination can only
+                    // mirror from a URL that actually serves the blob.
+                    sources.firstNotNullOfOrNull { source ->
+                        try {
+                            val token = blossomAuthToken(privKeyHex, chunk.sha256, "upload")
+                            val body = org.json.JSONObject()
+                                .put("url", "${source.trimEnd('/')}/${chunk.sha256}")
+                                .toString()
+                                .toRequestBody("application/json".toMediaType())
+                            val request = Request.Builder()
+                                .url("${dest.trimEnd('/')}/mirror")
+                                .put(body)
+                                .header("Authorization", "Nostr $token")
+                                .build()
+                            httpClient.newCall(request).execute().use { response ->
+                                if (response.isSuccessful) dest else null
+                            }
+                        } catch (e: Exception) {
+                            null
                         }
-                    } catch (e: Exception) {
-                        null
                     }
                 }
             }.awaitAll()
@@ -351,12 +378,17 @@ class BlossomService(private val httpClient: OkHttpClient) {
         // response (timeout, 5xx, SHA mismatch, empty body, IO error) flips this
         // to false so we return TransientFailure instead of declaring orphan.
         var allNotFound = true
+        var sawNotFound = false
         var firstError: String? = null
         fun recordError(msg: String) {
             allNotFound = false
             if (firstError == null) firstError = msg
         }
-        for (server in chunk.servers) {
+        // Earmarks published before the manifest carried a server list have
+        // none. That says nothing about where the blob is, so it is asked for
+        // wherever this client puts its own — not written off unread.
+        val servers = chunk.servers.ifEmpty { fallbackServers }
+        for (server in servers) {
             try {
                 val url = "${server.trimEnd('/')}/${chunk.sha256}"
                 // Sign a BUD "get" authorization: servers with a pubkey
@@ -380,9 +412,7 @@ class BlossomService(private val httpClient: OkHttpClient) {
                             if (actual == chunk.sha256) return ChunkFetchResult.Success(bytes)
                             recordError("$server: sha256 mismatch")
                         }
-                        response.code == 404 -> {
-                            // leave allNotFound alone; no error recorded
-                        }
+                        response.code == 404 -> sawNotFound = true
                         else -> recordError("$server: HTTP ${response.code}")
                     }
                 }
@@ -390,8 +420,13 @@ class BlossomService(private val httpClient: OkHttpClient) {
                 recordError("$server: ${e.message ?: e.javaClass.simpleName}")
             }
         }
-        return if (allNotFound) ChunkFetchResult.AllNotFound
-        else ChunkFetchResult.TransientFailure(firstError ?: "unknown failure")
+        // Orphaning is irreversible, so it takes a server actually saying 404.
+        // Without that this is a chunk nobody was asked about — no servers to
+        // try — which is ignorance, not proof of absence.
+        return if (allNotFound && sawNotFound) ChunkFetchResult.AllNotFound
+        else ChunkFetchResult.TransientFailure(
+            firstError ?: "no Blossom server was reachable for ${chunk.sha256.take(8)}"
+        )
     }
 
     /**
