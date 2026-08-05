@@ -282,9 +282,23 @@ func downloadChunk(ctx context.Context, serverURL, sha256hex, hexPrivKey string)
 	return data, nil
 }
 
+// downloadChunkWithFallback fetches a chunk from the servers its manifest
+// names, falling back to the configured servers when it names none.
+//
+// Earmarks published before the manifest recorded a server list have an empty
+// Servers, which says nothing about where the blob is. Iterating it as-is asks
+// nobody and reports failure, so those chunks were undownloadable by every
+// client at once.
 func downloadChunkWithFallback(ctx context.Context, chunk BlossomChunk, hexPrivKey string) ([]byte, error) {
+	servers := chunk.Servers
+	if len(servers) == 0 {
+		servers = BlossomServers()
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("chunk %d: no Blossom servers to try", chunk.Index)
+	}
 	var lastErr error
-	for _, server := range chunk.Servers {
+	for _, server := range servers {
 		data, err := downloadChunk(ctx, server, chunk.SHA256, hexPrivKey)
 		if err == nil {
 			return data, nil

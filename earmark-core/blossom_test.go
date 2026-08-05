@@ -528,3 +528,36 @@ func TestPrepareUploadSHA256sKnownBeforeUpload(t *testing.T) {
 		t.Error("Servers should be empty before UploadPrepared")
 	}
 }
+
+// TestDownloadChunkWithFallback_NoServersUsesConfigured verifies that a chunk
+// whose manifest names no servers is fetched from the configured servers
+// instead of failing unasked. Earmarks published before the manifest recorded
+// a server list have exactly this shape, and iterating an empty list made them
+// undownloadable by every client at once.
+func TestDownloadChunkWithFallback_NoServersUsesConfigured(t *testing.T) {
+	srv, cleanup := blossomTestServer(t)
+	defer cleanup()
+
+	Configure(Settings{BlossomServers: []string{srv.URL}})
+	defer Configure(Settings{})
+
+	privKey := nostr.GeneratePrivateKey()
+	key, _ := generateEncryptionKey()
+	encrypted, err := encryptChunk([]byte("audio with no server recorded"), key)
+	if err != nil {
+		t.Fatalf("encryptChunk: %v", err)
+	}
+	sum := sha256Hex(encrypted)
+	if err := uploadChunk(context.Background(), srv.URL, encrypted, sum, privKey, nil, time.Minute); err != nil {
+		t.Fatalf("uploadChunk: %v", err)
+	}
+
+	chunk := BlossomChunk{Index: 0, SHA256: sum, Servers: nil}
+	got, err := downloadChunkWithFallback(context.Background(), chunk, privKey)
+	if err != nil {
+		t.Fatalf("downloadChunkWithFallback: %v", err)
+	}
+	if !bytes.Equal(got, encrypted) {
+		t.Error("downloaded data does not match uploaded data")
+	}
+}
